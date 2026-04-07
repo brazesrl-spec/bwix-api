@@ -251,7 +251,6 @@ async def create_analyse(
         "pdf_hash": pdf_hash,
         "data_json": full_data,
         "unlocked": is_admin,
-        "test": is_admin,
     })
 
     # Admin mode → return full results immediately
