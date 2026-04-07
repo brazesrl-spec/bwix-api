@@ -31,7 +31,7 @@ stripe.api_key = STRIPE_SECRET
 app = FastAPI(title="BWIX API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL, "https://bwixapp.vercel.app", "https://bwix.app", "http://localhost:8080"],
+    allow_origins=[FRONTEND_URL, "https://bwixapp.vercel.app", "https://bwix.app", "https://www.bwix.app", "http://localhost:8080"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -164,6 +164,7 @@ async def send_email(to: str, subject: str, html: str):
 
 # ── Routes ──────────────────────────────────────────────────────────────────
 
+@app.get("/health")
 @app.get("/api/health")
 async def health():
     return {"status": "ok"}
