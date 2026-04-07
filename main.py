@@ -24,6 +24,7 @@ STRIPE_WEBHOOK_SECRET = os.environ["STRIPE_WEBHOOK_SECRET"].strip()
 RESEND_API_KEY = os.environ["RESEND_API_KEY"].strip()
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"].strip()
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://bwixapp.vercel.app").strip()
+ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "").strip()
 
 stripe.api_key = STRIPE_SECRET
 
@@ -173,8 +174,13 @@ async def create_analyse(
     file: UploadFile = File(...),
     email: str = Form(...),
     secteur: str = Form(""),
+    admin: str = Form(""),
 ):
     """Upload PDF → extract → compute ratios → Claude analysis → store in Supabase."""
+    is_admin = bool(ADMIN_SECRET and admin == ADMIN_SECRET)
+    if is_admin:
+        import logging
+        logging.warning("ADMIN MODE — analyse for %s", email)
     if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(400, "Seuls les fichiers PDF sont acceptés.")
 
@@ -243,8 +249,36 @@ async def create_analyse(
         "email": email.strip().lower(),
         "pdf_hash": pdf_hash,
         "data_json": full_data,
-        "unlocked": False,
+        "unlocked": is_admin,
+        "test": is_admin,
     })
+
+    # Admin mode → return full results immediately
+    if is_admin:
+        return {
+            "token": token,
+            "is_consolidated": is_consolidated,
+            "annee": extracted.get('annee_exercice'),
+            "score_sante": ai_analysis.get('score_sante', 50),
+            "unlocked": True,
+            "freemium": {
+                "ebitda": ratios['rentabilite']['ebitda'],
+                "roe": ratios['rentabilite']['roe'],
+                "liquidite_generale": ratios['liquidite']['liquidite_generale'],
+                "solvabilite": ratios['structure']['solvabilite'],
+            },
+            "valorisation_floue": {
+                "fourchette_low": ratios.get('valorisation_resume', {}).get('fourchette_equity_low'),
+                "fourchette_high": ratios.get('valorisation_resume', {}).get('fourchette_equity_high'),
+            },
+            "full": {
+                "comptes": data_n,
+                "ratios": ratios,
+                "ai_analysis": ai_analysis,
+                "valorisation_resume": ratios.get('valorisation_resume', {}),
+                "secteur": secteur,
+            },
+        }
 
     # Return freemium preview
     score = ai_analysis.get('score_sante', 50)
