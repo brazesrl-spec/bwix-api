@@ -369,8 +369,8 @@ async def create_checkout(request: Request):
             "quantity": 1,
         }],
         mode="payment",
-        success_url=f"{FRONTEND_URL}/analyse.html?token={token}&success=1",
-        cancel_url=f"{FRONTEND_URL}/analyse.html?token={token}&cancelled=1",
+        success_url=f"{FRONTEND_URL}/resultats?token={token}",
+        cancel_url=f"{FRONTEND_URL}/resultats?token={token}",
         customer_email=rows[0]["email"],
         metadata={"analyse_token": token},
     )
