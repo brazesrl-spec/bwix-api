@@ -207,12 +207,43 @@ async def create_analyse(
 
     data_n = extracted['exercice']
     data_n1 = extracted['exercice_precedent']
+    has_n1 = bool(data_n1 and any(v for k, v in data_n1.items() if k not in ('_ca_is_marge_brute',) and v))
 
     # Compute ratios for current year
     ratios = compute_ratios(data_n, secteur)
+    ratios_n1 = compute_ratios(data_n1, secteur) if has_n1 else None
+
+    # EBITDA multi-year + average for valuation
+    ebitda_n = ratios['rentabilite']['ebitda']
+    ebitda_n1 = ratios_n1['rentabilite']['ebitda'] if ratios_n1 else None
+    ebitda_avg = round((ebitda_n + ebitda_n1) / 2, 2) if ebitda_n1 is not None else ebitda_n
+    nb_exercices = 2 if has_n1 else 1
+
+    # EBITDA variation warning
+    ebitda_variation = None
+    if ebitda_n1 and ebitda_n1 != 0:
+        ebitda_variation = round(abs(ebitda_n - ebitda_n1) / abs(ebitda_n1), 4)
+
+    # Recalculate valuation using average EBITDA if 2 years
+    if has_n1 and ebitda_avg:
+        from ratios import SECTEUR_MULTIPLES
+        secteur_key = secteur or ''
+        multiples = SECTEUR_MULTIPLES.get(secteur_key, {'low': 4, 'high': 8, 'default': 5})
+        dette_nette = ratios['structure']['dette_nette']
+        multiple = multiples['default']
+        ev = ebitda_avg * multiple
+        ratios['valorisation_resume']['ebitda_moyenne'] = ebitda_avg
+        ratios['valorisation_resume']['ev_ebitda'] = round(ev, 2)
+        ratios['valorisation_resume']['equity_ev_ebitda'] = round(ev - dette_nette, 2)
+        ratios['valorisation_resume']['fourchette_equity_low'] = round(ebitda_avg * multiples['low'] - dette_nette, 2)
+        ratios['valorisation_resume']['fourchette_equity_high'] = round(ebitda_avg * multiples['high'] - dette_nette, 2)
+        ratios['valorisation']['valeur_ev_ebitda'] = round(ev, 2)
+        ratios['valorisation']['valeur_equity_ev'] = round(ev - dette_nette, 2)
+        ratios['valorisation']['fourchette_ev_low'] = ratios['valorisation_resume']['fourchette_equity_low']
+        ratios['valorisation']['fourchette_ev_high'] = ratios['valorisation_resume']['fourchette_equity_high']
 
     # Compute DCF if we have 2 years
-    if data_n1 and any(v for k, v in data_n1.items() if k not in ('_ca_is_marge_brute',) and v):
+    if has_n1:
         dcf = compute_dcf([data_n1, data_n])
         if dcf:
             ratios['valorisation']['dcf'] = dcf
@@ -241,6 +272,11 @@ async def create_analyse(
         'comptes_precedent': data_n1,
         'annee': extracted.get('annee_exercice'),
         'annee_precedente': extracted.get('annee_precedente'),
+        'nb_exercices': nb_exercices,
+        'ebitda_n': ebitda_n,
+        'ebitda_n1': ebitda_n1,
+        'ebitda_moyenne': ebitda_avg,
+        'ebitda_variation': ebitda_variation,
         'ratios': ratios,
         'score_sante': score_sante,
         'ai_analysis': ai_analysis,
@@ -257,14 +293,25 @@ async def create_analyse(
         "unlocked": is_admin,
     })
 
+    # Common response fields
+    multi = {
+        "nb_exercices": nb_exercices,
+        "annee": extracted.get('annee_exercice'),
+        "annee_precedente": extracted.get('annee_precedente'),
+        "ebitda_n": ebitda_n,
+        "ebitda_n1": ebitda_n1,
+        "ebitda_moyenne": ebitda_avg,
+        "ebitda_variation": ebitda_variation,
+    }
+
     # Admin mode → return full results immediately
     if is_admin:
         return {
             "token": token,
             "is_consolidated": is_consolidated,
-            "annee": extracted.get('annee_exercice'),
             "score_sante": score_sante,
             "unlocked": True,
+            **multi,
             "freemium": {
                 "ebitda": ratios['rentabilite']['ebitda'],
                 "roe": ratios['rentabilite']['roe'],
@@ -286,11 +333,12 @@ async def create_analyse(
 
     # Return freemium preview
     vr = ratios.get('valorisation_resume', {})
-    preview = {
+    return {
         "token": token,
         "is_consolidated": is_consolidated,
-        "annee": extracted.get('annee_exercice'),
         "score_sante": score_sante,
+        "unlocked": False,
+        **multi,
         "freemium": {
             "ebitda": ratios['rentabilite']['ebitda'],
             "roe": ratios['rentabilite']['roe'],
@@ -301,9 +349,7 @@ async def create_analyse(
             "fourchette_low": vr.get('fourchette_equity_low'),
             "fourchette_high": vr.get('fourchette_equity_high'),
         },
-        "unlocked": False,
     }
-    return preview
 
 
 @app.get("/api/analyse/{token}")
@@ -323,6 +369,12 @@ async def get_analyse(token: str):
     result = {
         "token": token,
         "annee": data.get('annee'),
+        "annee_precedente": data.get('annee_precedente'),
+        "nb_exercices": data.get('nb_exercices', 1),
+        "ebitda_n": data.get('ebitda_n'),
+        "ebitda_n1": data.get('ebitda_n1'),
+        "ebitda_moyenne": data.get('ebitda_moyenne'),
+        "ebitda_variation": data.get('ebitda_variation'),
         "is_consolidated": data.get('is_consolidated', False),
         "score_sante": data.get('score_sante') or ai.get('score_sante', 50),
         "unlocked": unlocked,
