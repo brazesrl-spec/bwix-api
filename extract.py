@@ -128,7 +128,11 @@ def extract_bnb_pdf(pdf_path: str) -> dict:
 
                     key = CODE_MAP[code]
                     after_code = line[m.end():].strip()
-                    amounts = re.findall(r'-?(?:\d{1,3}(?:\.\d{3})+|\b0\b)', after_code)
+
+                    # Match BNB amounts after the code.
+                    # BNB format: dots as thousands sep (520.980) OR plain integers (904, 85, 0)
+                    # After the code position, everything is amounts — safe to be permissive.
+                    amounts = re.findall(r'-?(?:\d{1,3}(?:\.\d{3})+|\b\d+\b)', after_code)
 
                     if not amounts:
                         break
