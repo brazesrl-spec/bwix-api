@@ -232,14 +232,20 @@ def compute_ratios(data: dict, secteur: str = None, params: dict = None) -> dict
     return ratios
 
 
-def compute_score(ratios: dict, secteur: str = '') -> int:
-    """Deterministic health score 0-100 from financial ratios."""
+def compute_score(ratios: dict, secteur: str = '', comptes_data: dict = None,
+                   nb_exercices: int = 1, ebitda_variation: float = None) -> dict:
+    """Deterministic health score 0-100 with deduction breakdown.
+
+    Returns {'score': int, 'score_deductions': [{'motif': str, 'points': int}]}
+    """
+    if comptes_data is None:
+        comptes_data = {}
     is_special = secteur in STRUCTURE_PARTICULIERE
     score = 50  # baseline
+    deductions = []
     ind = ratios.get('indicators', {})
 
     # +/- points based on indicator status
-    # Reduced weights for structures particulières (volatile by nature)
     weights = {
         'solvabilite': 15,
         'liquidite_generale': 8 if is_special else 12,
@@ -253,7 +259,6 @@ def compute_score(ratios: dict, secteur: str = '') -> int:
         if status == 'bon':
             score += w
         elif status == 'alerte':
-            # Structures particulières: alerte = warning (half malus) not full malus
             score -= (w // 2) if is_special else w
 
     # Positive EBITDA bonus
@@ -261,9 +266,9 @@ def compute_score(ratios: dict, secteur: str = '') -> int:
     if ebitda > 0:
         score += 5
     elif ebitda < 0:
-        score -= 5 if is_special else 10  # less penalty for special structures
+        score -= 5 if is_special else 10
 
-    # Positive net result bonus (lower threshold for special structures)
+    # Positive net result bonus
     roe = ratios.get('rentabilite', {}).get('roe')
     roe_threshold = 0.03 if is_special else 0.05
     if roe is not None and roe > roe_threshold:
@@ -277,7 +282,55 @@ def compute_score(ratios: dict, secteur: str = '') -> int:
         elif dettes_ebitda > 5:
             score -= 3 if is_special else 5
 
-    return max(0, min(100, score))
+    # ── Risk deductions (applied after base score) ──────────────────────
+    ca = comptes_data.get('chiffre_affaires', 0) or 0
+    stocks = comptes_data.get('stocks', 0) or 0
+    total_passif = comptes_data.get('total_passif', 0) or 0
+    autres_dettes = comptes_data.get('autres_dettes', 0) or 0
+    charges_fin = abs(comptes_data.get('charges_financieres', 0) or 0)
+    dette_bancaire_lt = comptes_data.get('dette_bancaire_lt', 0) or 0
+    dette_bancaire_ct = comptes_data.get('dette_bancaire_ct', 0) or 0
+    bfr = ratios.get('liquidite', {}).get('bfr', 0) or 0
+
+    # BFR vs CA (non-cumulative: highest applies)
+    if ca > 0:
+        bfr_ratio = bfr / ca
+        if bfr_ratio > 1.5:
+            deductions.append({'motif': 'BFR > 1.5x CA', 'points': -8})
+            score -= 8
+        elif bfr_ratio > 1.0:
+            deductions.append({'motif': 'BFR > 1.0x CA', 'points': -5})
+            score -= 5
+
+    # Stocks vs CA
+    if ca > 0 and stocks > ca:
+        deductions.append({'motif': 'Stocks > 1.0x CA', 'points': -5})
+        score -= 5
+
+    # Autres dettes vs total passif
+    if total_passif > 0 and autres_dettes / total_passif > 0.15:
+        deductions.append({'motif': 'Autres dettes > 15% du passif', 'points': -4})
+        score -= 4
+
+    # Charges financières without identified bank debt
+    if charges_fin > 0 and dette_bancaire_lt == 0 and dette_bancaire_ct == 0:
+        deductions.append({'motif': 'Charges financi\u00e8res sans dette bancaire identifi\u00e9e', 'points': -3})
+        score -= 3
+
+    # EBITDA variation > 30%
+    if ebitda_variation is not None and ebitda_variation > 0.30:
+        deductions.append({'motif': 'Variation EBITDA N/N-1 > 30%', 'points': -4})
+        score -= 4
+
+    # Less than 3 exercises
+    if nb_exercices < 3:
+        deductions.append({'motif': f'Seulement {nb_exercices} exercice(s) disponible(s)', 'points': -3})
+        score -= 3
+
+    # Clamp to [0, 95]
+    score = max(0, min(95, score))
+
+    return {'score': score, 'score_deductions': deductions}
 
 
 def compute_dcf(comptes_list: list, wacc: float = 0.08, growth: float = 0.02) -> dict | None:

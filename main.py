@@ -78,44 +78,51 @@ async def _supabase_update(table: str, match_params: str, data: dict):
 
 
 # ── Claude AI analysis ─────────────────────────────────────────────────────
-def run_claude_analysis(ratios_data: dict, comptes_data: dict, secteur: str) -> dict:
+def run_claude_analysis(ratios_data: dict, comptes_data: dict, secteur: str,
+                        valorisation: dict = None) -> dict:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-    vr = ratios_data.get('valorisation_resume', {})
+    if valorisation is None:
+        valorisation = {}
+
     ia_summary = {
         'secteur': secteur,
         'schema_abrege': ratios_data.get('schema_abrege', False),
         'rentabilite': ratios_data.get('rentabilite', {}),
         'structure': ratios_data.get('structure', {}),
         'liquidite': ratios_data.get('liquidite', {}),
-        'valorisation': {
-            'ebitda': vr.get('ebitda'),
-            'multiple_sectoriel': vr.get('multiple'),
-            'ev_ebitda': vr.get('ev_ebitda'),
-            'dette_nette': vr.get('dette_nette'),
-            'equity_ev_ebitda': vr.get('equity_ev_ebitda'),
-            'capitaux_propres_comptables': vr.get('capitaux_propres_comptables'),
-            'fourchette_equity': f"{vr.get('fourchette_equity_low', 0):,.0f} — {vr.get('fourchette_equity_high', 0):,.0f}",
-            'dcf_ev': vr.get('dcf_ev'),
-            'dcf_equity': vr.get('dcf_equity'),
-        },
         'indicators': ratios_data.get('indicators', {}),
     }
 
+    valo_block = f"""
+VALORISATIONS (ne pas recalculer) :
+- EBITDA de référence : {valorisation.get('ebitda_reference', 0):,.0f}€ ({valorisation.get('ebitda_reference_label', '')})
+- Multiple sectoriel : {valorisation.get('multiple_sectoriel', 5)}x
+- EV/EBITDA : {valorisation.get('ev_ebitda', 0):,.0f}€
+- DCF : {valorisation.get('dcf', 'Non calculable')}{'€' if isinstance(valorisation.get('dcf'), (int, float)) else ''}
+- Actif net corrigé : {valorisation.get('actif_net', 0):,.0f}€
+- Fourchette : {valorisation.get('fourchette_basse', 0):,.0f}€ → {valorisation.get('fourchette_haute', 0):,.0f}€"""
+
     context = (
         f"Données comptables :\n{json.dumps(comptes_data, indent=2, ensure_ascii=False)}\n\n"
-        f"Ratios et valorisation :\n{json.dumps(ia_summary, indent=2, ensure_ascii=False)}"
+        f"Ratios :\n{json.dumps(ia_summary, indent=2, ensure_ascii=False)}\n\n"
+        f"{valo_block}"
     )
 
     message = client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=2000,
-        system="""Tu es un analyste financier expert en PME belges.
-Analyse ces données financières de façon claire, structurée et actionnable pour le dirigeant.
+        system="""Tu reçois des données financières déjà calculées par le système.
+NE PAS recalculer les valorisations toi-même.
+Utilise UNIQUEMENT les chiffres fournis dans la section VALORISATIONS ci-dessous.
+Quand tu mentionnes une fourchette de valeur, utilise uniquement fourchette_basse et fourchette_haute.
+Quand tu mentionnes la valeur EV/EBITDA, utilise uniquement ev_ebitda.
+
+Tu es un analyste financier expert en PME belges.
+Analyse ces données de façon claire, structurée et actionnable.
 Pas de jargon inutile. Sois direct sur les points forts, les risques et les recommandations prioritaires.
 
 IMPORTANT :
-- Utilise EXACTEMENT les valeurs de valorisation fournies dans le JSON. Ne recalcule pas.
 - Si schema_abrege=true, ne commente pas les marges (EBITDA, nette).
 - La dette nette fournie est la dette nette BANCAIRE retraitée.
 
@@ -213,47 +220,77 @@ async def create_analyse(
     ratios = compute_ratios(data_n, secteur)
     ratios_n1 = compute_ratios(data_n1, secteur) if has_n1 else None
 
-    # EBITDA multi-year + average for valuation
+    # EBITDA multi-year
     ebitda_n = ratios['rentabilite']['ebitda']
     ebitda_n1 = ratios_n1['rentabilite']['ebitda'] if ratios_n1 else None
-    ebitda_avg = round((ebitda_n + ebitda_n1) / 2, 2) if ebitda_n1 is not None else ebitda_n
     nb_exercices = 2 if has_n1 else 1
+    annee_n = extracted.get('annee_exercice')
+    annee_n1 = extracted.get('annee_precedente')
 
-    # EBITDA variation warning
+    # EBITDA variation
     ebitda_variation = None
     if ebitda_n1 and ebitda_n1 != 0:
         ebitda_variation = round(abs(ebitda_n - ebitda_n1) / abs(ebitda_n1), 4)
 
-    # Recalculate valuation using average EBITDA if 2 years
-    if has_n1 and ebitda_avg:
-        from ratios import SECTEUR_MULTIPLES
-        secteur_key = secteur or ''
-        multiples = SECTEUR_MULTIPLES.get(secteur_key, {'low': 4, 'high': 8, 'default': 5})
-        dette_nette = ratios['structure']['dette_nette']
-        multiple = multiples['default']
-        ev = ebitda_avg * multiple
-        ratios['valorisation_resume']['ebitda_moyenne'] = ebitda_avg
-        ratios['valorisation_resume']['ev_ebitda'] = round(ev, 2)
-        ratios['valorisation_resume']['equity_ev_ebitda'] = round(ev - dette_nette, 2)
-        ratios['valorisation_resume']['fourchette_equity_low'] = round(ebitda_avg * multiples['low'] - dette_nette, 2)
-        ratios['valorisation_resume']['fourchette_equity_high'] = round(ebitda_avg * multiples['high'] - dette_nette, 2)
-        ratios['valorisation']['valeur_ev_ebitda'] = round(ev, 2)
-        ratios['valorisation']['valeur_equity_ev'] = round(ev - dette_nette, 2)
-        ratios['valorisation']['fourchette_ev_low'] = ratios['valorisation_resume']['fourchette_equity_low']
-        ratios['valorisation']['fourchette_ev_high'] = ratios['valorisation_resume']['fourchette_equity_high']
+    # ── CORRECTION 2: single EBITDA reference for valuation ──
+    if nb_exercices >= 2 and ebitda_n1 is not None:
+        ebitda_reference = round((ebitda_n + ebitda_n1) / 2, 2)
+        ebitda_reference_label = f"Moyenne {annee_n}-{annee_n1}"
+    else:
+        ebitda_reference = ebitda_n
+        ebitda_reference_label = f"{annee_n} seul"
+
+    secteur_key = secteur or ''
+    multiples = SECTEUR_MULTIPLES.get(secteur_key, {'low': 4, 'high': 8, 'default': 5})
+    dette_nette = ratios['structure']['dette_nette']
+    multiple = multiples['default']
+
+    ev_ebitda = round(ebitda_reference * multiple, 2) if ebitda_reference > 0 else 0
+    fourchette_low = round(ebitda_reference * multiples['low'] - dette_nette, 2) if ebitda_reference > 0 else 0
+    fourchette_high = round(ebitda_reference * multiples['high'] - dette_nette, 2) if ebitda_reference > 0 else 0
+    actif_net = ratios['valorisation']['valeur_capitaux_propres']
 
     # Compute DCF if we have 2 years
+    dcf_equity = None
     if has_n1:
         dcf = compute_dcf([data_n1, data_n])
         if dcf:
             ratios['valorisation']['dcf'] = dcf
-            dette_nette = ratios['structure']['dette_nette']
-            ratios['valorisation_resume']['dcf_ev'] = dcf['valeur_dcf']
-            ratios['valorisation_resume']['dcf_equity'] = round(dcf['valeur_dcf'] - dette_nette, 2)
+            dcf_equity = round(dcf['valeur_dcf'] - dette_nette, 2)
 
-    # Claude AI analysis
+    # Unified valorisation object
+    valorisation_unified = {
+        'ebitda_reference': ebitda_reference,
+        'ebitda_reference_label': ebitda_reference_label,
+        'nb_exercices': nb_exercices,
+        'multiple_sectoriel': multiple,
+        'ev_ebitda': ev_ebitda,
+        'dcf': dcf_equity,
+        'actif_net': actif_net,
+        'fourchette_basse': fourchette_low,
+        'fourchette_haute': fourchette_high,
+        'dette_nette': dette_nette,
+    }
+
+    # Update ratios with unified values
+    ratios['valorisation_resume'] = {
+        'ebitda': ebitda_reference,
+        'ebitda_reference': ebitda_reference,
+        'ebitda_reference_label': ebitda_reference_label,
+        'multiple': multiple,
+        'ev_ebitda': ev_ebitda,
+        'dette_nette': dette_nette,
+        'equity_ev_ebitda': round(ev_ebitda - dette_nette, 2) if ev_ebitda else 0,
+        'capitaux_propres_comptables': actif_net,
+        'fourchette_equity_low': fourchette_low,
+        'fourchette_equity_high': fourchette_high,
+        'dcf_ev': dcf['valeur_dcf'] if has_n1 and dcf_equity else None,
+        'dcf_equity': dcf_equity,
+    }
+
+    # Claude AI analysis (CORRECTION 3: strict prompt)
     try:
-        ai_analysis = run_claude_analysis(ratios, data_n, secteur)
+        ai_analysis = run_claude_analysis(ratios, data_n, secteur, valorisation_unified)
     except Exception:
         ai_analysis = {
             'synthese': 'Analyse IA indisponible.',
@@ -262,23 +299,32 @@ async def create_analyse(
             'score_sante': 50,
         }
 
-    # Deterministic score from ratios (not Claude)
-    score_sante = compute_score(ratios, secteur)
+    # Deterministic score with deductions (CORRECTION 1)
+    score_result = compute_score(
+        ratios, secteur, comptes_data=data_n,
+        nb_exercices=nb_exercices, ebitda_variation=ebitda_variation
+    )
+    score_sante = score_result['score']
+    score_deductions = score_result['score_deductions']
 
     # Build full analysis payload
     token = str(uuid.uuid4())
     full_data = {
         'comptes': data_n,
         'comptes_precedent': data_n1,
-        'annee': extracted.get('annee_exercice'),
-        'annee_precedente': extracted.get('annee_precedente'),
+        'annee': annee_n,
+        'annee_precedente': annee_n1,
+        'annees_disponibles': [annee_n1, annee_n] if has_n1 else [annee_n],
         'nb_exercices': nb_exercices,
         'ebitda_n': ebitda_n,
         'ebitda_n1': ebitda_n1,
-        'ebitda_moyenne': ebitda_avg,
+        'ebitda_reference': ebitda_reference,
+        'ebitda_reference_label': ebitda_reference_label,
         'ebitda_variation': ebitda_variation,
+        'valorisation': valorisation_unified,
         'ratios': ratios,
         'score_sante': score_sante,
+        'score_deductions': score_deductions,
         'ai_analysis': ai_analysis,
         'secteur': secteur,
         'is_structure_particuliere': secteur in STRUCTURE_PARTICULIERE,
@@ -297,12 +343,16 @@ async def create_analyse(
     # Common response fields
     multi = {
         "nb_exercices": nb_exercices,
-        "annee": extracted.get('annee_exercice'),
-        "annee_precedente": extracted.get('annee_precedente'),
+        "annee": annee_n,
+        "annee_precedente": annee_n1,
+        "annees_disponibles": [annee_n1, annee_n] if has_n1 else [annee_n],
         "ebitda_n": ebitda_n,
         "ebitda_n1": ebitda_n1,
-        "ebitda_moyenne": ebitda_avg,
+        "ebitda_reference": ebitda_reference,
+        "ebitda_reference_label": ebitda_reference_label,
         "ebitda_variation": ebitda_variation,
+        "score_deductions": score_deductions,
+        "valorisation": valorisation_unified,
     }
 
     # Admin mode → return full results immediately
@@ -367,15 +417,20 @@ async def get_analyse(token: str):
     ai = data.get('ai_analysis', {})
     vr = ratios.get('valorisation_resume', {})
 
+    valo = data.get('valorisation', {})
     result = {
         "token": token,
         "annee": data.get('annee'),
         "annee_precedente": data.get('annee_precedente'),
+        "annees_disponibles": data.get('annees_disponibles', [data.get('annee')]),
         "nb_exercices": data.get('nb_exercices', 1),
         "ebitda_n": data.get('ebitda_n'),
         "ebitda_n1": data.get('ebitda_n1'),
-        "ebitda_moyenne": data.get('ebitda_moyenne'),
+        "ebitda_reference": data.get('ebitda_reference'),
+        "ebitda_reference_label": data.get('ebitda_reference_label'),
         "ebitda_variation": data.get('ebitda_variation'),
+        "valorisation": valo,
+        "score_deductions": data.get('score_deductions', []),
         "is_consolidated": data.get('is_consolidated', False),
         "is_structure_particuliere": data.get('is_structure_particuliere', False),
         "score_sante": data.get('score_sante') or ai.get('score_sante', 50),
@@ -387,8 +442,8 @@ async def get_analyse(token: str):
             "solvabilite": ratios.get('structure', {}).get('solvabilite'),
         },
         "valorisation_floue": {
-            "fourchette_low": vr.get('fourchette_equity_low'),
-            "fourchette_high": vr.get('fourchette_equity_high'),
+            "fourchette_low": valo.get('fourchette_basse') or vr.get('fourchette_equity_low'),
+            "fourchette_high": valo.get('fourchette_haute') or vr.get('fourchette_equity_high'),
         },
     }
 
