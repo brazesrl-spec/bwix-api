@@ -246,8 +246,6 @@ async def create_analyse(
     multiple = multiples['default']
 
     ev_ebitda = round(ebitda_reference * multiple, 2) if ebitda_reference > 0 else 0
-    fourchette_low = round(ebitda_reference * multiples['low'] - dette_nette, 2) if ebitda_reference > 0 else 0
-    fourchette_high = round(ebitda_reference * multiples['high'] - dette_nette, 2) if ebitda_reference > 0 else 0
     actif_net = ratios['valorisation']['valeur_capitaux_propres']
 
     # Compute DCF if we have 2 years
@@ -257,6 +255,21 @@ async def create_analyse(
         if dcf:
             ratios['valorisation']['dcf'] = dcf
             dcf_equity = round(dcf['valeur_dcf'] - dette_nette, 2)
+
+    # CORRECTION 6: fourchette cohérente
+    # Borne basse = min(ev_ebitda, actif_net) × 0.9
+    # Borne haute = max(ev_ebitda, dcf) × 1.05 if stable, else max(ev_ebitda, actif_net) × 1.05
+    vals_for_low = [v for v in [ev_ebitda, actif_net] if v and v > 0]
+    fourchette_low = round(min(vals_for_low) * 0.9, 2) if vals_for_low else 0
+
+    is_stable = ebitda_variation is None or ebitda_variation <= 0.30
+    if is_stable and dcf_equity and dcf_equity > 0:
+        vals_for_high = [v for v in [ev_ebitda, dcf_equity] if v and v > 0]
+        fourchette_methode = "EV/EBITDA + DCF"
+    else:
+        vals_for_high = [v for v in [ev_ebitda, actif_net] if v and v > 0]
+        fourchette_methode = "EV/EBITDA + Actif net"
+    fourchette_high = round(max(vals_for_high) * 1.05, 2) if vals_for_high else 0
 
     # Unified valorisation object
     valorisation_unified = {
@@ -269,6 +282,7 @@ async def create_analyse(
         'actif_net': actif_net,
         'fourchette_basse': fourchette_low,
         'fourchette_haute': fourchette_high,
+        'fourchette_methode': fourchette_methode,
         'dette_nette': dette_nette,
     }
 
