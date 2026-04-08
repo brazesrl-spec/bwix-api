@@ -17,14 +17,26 @@ from extract import extract_bnb_pdf, detect_consolidated
 from ratios import compute_ratios, compute_dcf, compute_score, SECTEUR_MULTIPLES, STRUCTURE_PARTICULIERE
 
 # ── Config ──────────────────────────────────────────────────────────────────
+import logging
+
 SUPABASE_URL = os.environ["SUPABASE_URL"].strip()
 SUPABASE_KEY = os.environ["SUPABASE_KEY"].strip()
-STRIPE_SECRET = os.environ["STRIPE_SECRET_KEY"].strip()
-STRIPE_WEBHOOK_SECRET = os.environ["STRIPE_WEBHOOK_SECRET"].strip()
 RESEND_API_KEY = os.environ["RESEND_API_KEY"].strip()
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"].strip()
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://bwixapp.vercel.app").strip()
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "").strip()
+
+# Stripe: test mode support
+STRIPE_TEST_MODE = os.environ.get("STRIPE_TEST_MODE", "false").strip().lower() == "true"
+if STRIPE_TEST_MODE:
+    STRIPE_SECRET = os.environ.get("STRIPE_SECRET_KEY_TEST", "").strip()
+    STRIPE_PRICE_ID = os.environ.get("STRIPE_PRICE_ID_TEST", "").strip()
+    STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "").strip()
+    logging.warning("\u26a0\ufe0f STRIPE TEST MODE ACTIF")
+else:
+    STRIPE_SECRET = os.environ["STRIPE_SECRET_KEY"].strip()
+    STRIPE_PRICE_ID = os.environ.get("STRIPE_PRICE_ID", "price_1TJK3M1XczkPkPz652TlUn4J").strip()
+    STRIPE_WEBHOOK_SECRET = os.environ["STRIPE_WEBHOOK_SECRET"].strip()
 
 stripe.api_key = STRIPE_SECRET
 
@@ -167,6 +179,26 @@ async def send_email(to: str, subject: str, html: str):
                 "html": html,
             },
         )
+
+
+async def send_unlock_email(email: str, token: str):
+    """Send analysis unlock confirmation email. Shared by Stripe webhook and promo codes."""
+    link = f"{FRONTEND_URL}/resultats?token={token}"
+    await send_email(
+        email,
+        "Votre analyse BWIX est pr\u00eate",
+        f"""<div style="font-family:Inter,sans-serif;max-width:600px;margin:0 auto;padding:40px 20px">
+        <h1 style="color:#1e3a5f">Votre analyse BWIX</h1>
+        <p>Votre analyse financi\u00e8re compl\u00e8te est d\u00e9sormais accessible.</p>
+        <p><a href="{link}" style="display:inline-block;background:#00c896;color:#0b1929;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:600">
+        Voir l'analyse compl\u00e8te</a></p>
+        <p style="color:#8fa3bf;font-size:14px;margin-top:24px">
+        Ce lien est unique et reste accessible \u00e0 tout moment.</p>
+        <hr style="border:none;border-top:1px solid #e2e8f0;margin:24px 0">
+        <p style="color:#8fa3bf;font-size:12px">
+        BWIX est un outil d'aide \u00e0 la d\u00e9cision indicatif. Les r\u00e9sultats ne constituent pas un conseil financier ou comptable.</p>
+        </div>""",
+    )
 
 
 # ── Routes ──────────────────────────────────────────────────────────────────
@@ -491,7 +523,7 @@ async def create_checkout(request: Request):
     session = stripe.checkout.Session.create(
         payment_method_types=["card"],
         line_items=[{
-            "price": "price_1TJK3M1XczkPkPz652TlUn4J",
+            "price": STRIPE_PRICE_ID,
             "quantity": 1,
         }],
         mode="payment",
@@ -519,26 +551,9 @@ async def stripe_webhook(request: Request):
         if token:
             await _supabase_update("analyses", f"token=eq.{token}", {"unlocked": True, "stripe_session_id": session["id"]})
 
-            # Send email with link
             rows = await _supabase_select("analyses", f"token=eq.{token}&select=email")
             if rows:
-                email = rows[0]["email"]
-                link = f"{FRONTEND_URL}/analyse.html?token={token}"
-                await send_email(
-                    email,
-                    "Votre analyse BWIX est prête",
-                    f"""<div style="font-family:Inter,sans-serif;max-width:600px;margin:0 auto;padding:40px 20px">
-                    <h1 style="color:#1e3a5f">Votre analyse BWIX</h1>
-                    <p>Merci pour votre achat. Votre analyse financière complète est désormais accessible.</p>
-                    <p><a href="{link}" style="display:inline-block;background:#00c896;color:#0b1929;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:600">
-                    Voir mon analyse complète</a></p>
-                    <p style="color:#8fa3bf;font-size:14px;margin-top:24px">
-                    Ce lien est unique et reste accessible à tout moment.</p>
-                    <hr style="border:none;border-top:1px solid #e2e8f0;margin:24px 0">
-                    <p style="color:#8fa3bf;font-size:12px">
-                    BWIX est un outil d'aide à la décision indicatif. Les résultats ne constituent pas un conseil financier ou comptable.</p>
-                    </div>""",
-                )
+                await send_unlock_email(rows[0]["email"], token)
 
     return {"received": True}
 
@@ -590,6 +605,11 @@ async def redeem_code(request: Request):
     # Unlock + increment
     await _supabase_update("analyses", f"token=eq.{analyse_token}", {"unlocked": True})
     await _supabase_update("promo_codes", f"code=eq.{code}", {"used_count": used + 1})
+
+    # Send unlock email
+    email_rows = await _supabase_select("analyses", f"token=eq.{analyse_token}&select=email")
+    if email_rows:
+        await send_unlock_email(email_rows[0]["email"], analyse_token)
 
     return {"ok": True, "message": "Analyse débloquée."}
 
