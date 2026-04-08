@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from extract import extract_bnb_pdf, detect_consolidated
-from ratios import compute_ratios, compute_dcf, compute_score, SECTEUR_MULTIPLES
+from ratios import compute_ratios, compute_dcf, compute_score, SECTEUR_MULTIPLES, STRUCTURE_PARTICULIERE
 
 # ── Config ──────────────────────────────────────────────────────────────────
 SUPABASE_URL = os.environ["SUPABASE_URL"].strip()
@@ -263,7 +263,7 @@ async def create_analyse(
         }
 
     # Deterministic score from ratios (not Claude)
-    score_sante = compute_score(ratios)
+    score_sante = compute_score(ratios, secteur)
 
     # Build full analysis payload
     token = str(uuid.uuid4())
@@ -281,6 +281,7 @@ async def create_analyse(
         'score_sante': score_sante,
         'ai_analysis': ai_analysis,
         'secteur': secteur,
+        'is_structure_particuliere': secteur in STRUCTURE_PARTICULIERE,
         'is_consolidated': is_consolidated,
     }
 
@@ -376,6 +377,7 @@ async def get_analyse(token: str):
         "ebitda_moyenne": data.get('ebitda_moyenne'),
         "ebitda_variation": data.get('ebitda_variation'),
         "is_consolidated": data.get('is_consolidated', False),
+        "is_structure_particuliere": data.get('is_structure_particuliere', False),
         "score_sante": data.get('score_sante') or ai.get('score_sante', 50),
         "unlocked": unlocked,
         "freemium": {

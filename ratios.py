@@ -6,6 +6,11 @@ SECTEUR_MULTIPLES = {
     'Services':           {'low': 5, 'high': 8, 'default': 6},
     'Commerce':           {'low': 4, 'high': 7, 'default': 5},
     'Industrie':          {'low': 5, 'high': 8, 'default': 6},
+    # Structures particulières
+    'Management / Holding': {'low': 3, 'high': 6, 'default': 4},
+    'Immobilier / SCI':     {'low': 6, 'high': 12, 'default': 8},
+    'ASBL':                 {'low': 0, 'high': 0, 'default': 0},
+    'Startup':              {'low': 5, 'high': 20, 'default': 8},
 }
 
 SECTEUR_BENCHMARKS = {
@@ -34,7 +39,31 @@ SECTEUR_BENCHMARKS = {
         'roe': (0.08, 0.20), 'solvabilite': (0.30, 0.50),
         'liquidite_generale': (1.2, 2.0), 'gearing': (0.3, 1.5),
     },
+    # Structures particulières — seuils adaptés
+    'Management / Holding': {
+        'marge_ebitda': (0.0, 1.0), 'marge_nette': (0.0, 1.0),
+        'roe': (0.03, 0.50), 'solvabilite': (0.20, 0.80),
+        'liquidite_generale': (0.7, 5.0), 'gearing': (0.0, 3.0),
+    },
+    'Immobilier / SCI': {
+        'marge_ebitda': (0.20, 0.70), 'marge_nette': (0.05, 0.40),
+        'roe': (0.03, 0.15), 'solvabilite': (0.15, 0.50),
+        'liquidite_generale': (0.7, 2.0), 'gearing': (0.5, 4.0),
+    },
+    'ASBL': {
+        'marge_ebitda': (-0.10, 0.15), 'marge_nette': (-0.10, 0.10),
+        'roe': (0.0, 0.10), 'solvabilite': (0.20, 0.70),
+        'liquidite_generale': (0.7, 3.0), 'gearing': (0.0, 2.0),
+    },
+    'Startup': {
+        'marge_ebitda': (-0.50, 0.30), 'marge_nette': (-0.50, 0.20),
+        'roe': (-0.50, 0.50), 'solvabilite': (0.10, 0.60),
+        'liquidite_generale': (0.7, 3.0), 'gearing': (0.0, 3.0),
+    },
 }
+
+# Sectors where EBITDA volatility is expected (warning instead of malus)
+STRUCTURE_PARTICULIERE = {'Management / Holding', 'Immobilier / SCI', 'ASBL', 'Startup'}
 
 
 def _safe_div(a, b):
@@ -203,48 +232,50 @@ def compute_ratios(data: dict, secteur: str = None, params: dict = None) -> dict
     return ratios
 
 
-def compute_score(ratios: dict) -> int:
+def compute_score(ratios: dict, secteur: str = '') -> int:
     """Deterministic health score 0-100 from financial ratios."""
+    is_special = secteur in STRUCTURE_PARTICULIERE
     score = 50  # baseline
     ind = ratios.get('indicators', {})
 
     # +/- points based on indicator status
+    # Reduced weights for structures particulières (volatile by nature)
     weights = {
         'solvabilite': 15,
-        'liquidite_generale': 12,
-        'roe': 12,
-        'marge_ebitda': 12,
-        'marge_nette': 8,
-        'gearing': 8,
+        'liquidite_generale': 8 if is_special else 12,
+        'roe': 6 if is_special else 12,
+        'marge_ebitda': 6 if is_special else 12,
+        'marge_nette': 4 if is_special else 8,
+        'gearing': 4 if is_special else 8,
     }
     for key, w in weights.items():
         status = (ind.get(key) or {}).get('status', 'neutral')
         if status == 'bon':
             score += w
         elif status == 'alerte':
-            score -= w
+            # Structures particulières: alerte = warning (half malus) not full malus
+            score -= (w // 2) if is_special else w
 
     # Positive EBITDA bonus
     ebitda = ratios.get('rentabilite', {}).get('ebitda', 0) or 0
     if ebitda > 0:
         score += 5
     elif ebitda < 0:
-        score -= 10
+        score -= 5 if is_special else 10  # less penalty for special structures
 
-    # Positive net result bonus
-    rent = ratios.get('rentabilite', {})
-    roe = rent.get('roe')
-    if roe is not None and roe > 0.05:
+    # Positive net result bonus (lower threshold for special structures)
+    roe = ratios.get('rentabilite', {}).get('roe')
+    roe_threshold = 0.03 if is_special else 0.05
+    if roe is not None and roe > roe_threshold:
         score += 5
 
     # Debt coverage
-    struct = ratios.get('structure', {})
-    dettes_ebitda = struct.get('dettes_ebitda')
+    dettes_ebitda = ratios.get('structure', {}).get('dettes_ebitda')
     if dettes_ebitda is not None:
         if dettes_ebitda < 2:
             score += 5
         elif dettes_ebitda > 5:
-            score -= 5
+            score -= 3 if is_special else 5
 
     return max(0, min(100, score))
 
