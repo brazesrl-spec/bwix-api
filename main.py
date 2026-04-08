@@ -479,3 +479,78 @@ async def stripe_webhook(request: Request):
 @app.get("/api/secteurs")
 async def list_secteurs():
     return {"secteurs": list(SECTEUR_MULTIPLES.keys())}
+
+
+# ── Promo codes ─────────────────────────────────────────────────────────────
+
+@app.post("/api/redeem-code")
+async def redeem_code(request: Request):
+    body = await request.json()
+    code = (body.get("code") or "").strip().upper()
+    analyse_token = body.get("token")
+
+    if not code or not analyse_token:
+        raise HTTPException(400, "Code et token requis.")
+
+    # Check code exists and is valid
+    rows = await _supabase_select("promo_codes", f"code=eq.{code}&select=*")
+    if not rows:
+        raise HTTPException(404, "Code invalide.")
+    promo = rows[0]
+
+    # Check expiry
+    if promo.get("expires_at"):
+        from datetime import datetime, timezone
+        expires = datetime.fromisoformat(promo["expires_at"].replace("Z", "+00:00"))
+        if datetime.now(timezone.utc) > expires:
+            raise HTTPException(410, "Code expiré.")
+
+    # Check usage
+    max_uses = promo.get("max_uses") or 0
+    used = promo.get("used_count") or 0
+    if max_uses > 0 and used >= max_uses:
+        raise HTTPException(410, "Code déjà utilisé.")
+
+    # Check analyse exists and not already unlocked
+    analyses = await _supabase_select("analyses", f"token=eq.{analyse_token}&select=token,unlocked")
+    if not analyses:
+        raise HTTPException(404, "Analyse introuvable.")
+    if analyses[0].get("unlocked"):
+        return {"ok": True, "message": "Analyse déjà débloquée."}
+
+    # Unlock + increment
+    await _supabase_update("analyses", f"token=eq.{analyse_token}", {"unlocked": True})
+    await _supabase_update("promo_codes", f"code=eq.{code}", {"used_count": used + 1})
+
+    return {"ok": True, "message": "Analyse débloquée."}
+
+
+# ── Admin ───────────────────────────────────────────────────────────────────
+
+@app.get("/api/admin/codes")
+async def admin_list_codes(key: str = ""):
+    if key != ADMIN_SECRET:
+        raise HTTPException(403, "Accès refusé.")
+    rows = await _supabase_select("promo_codes", "select=*&order=created_at.desc")
+    return {"codes": rows}
+
+
+@app.post("/api/admin/codes")
+async def admin_create_code(request: Request, key: str = ""):
+    if key != ADMIN_SECRET:
+        raise HTTPException(403, "Accès refusé.")
+    body = await request.json()
+    code = (body.get("code") or "").strip().upper()
+    max_uses = body.get("max_uses", 1)
+    expires_at = body.get("expires_at")
+
+    if not code:
+        raise HTTPException(400, "Code requis.")
+
+    record = await _supabase_insert("promo_codes", {
+        "code": code,
+        "max_uses": max_uses,
+        "used_count": 0,
+        "expires_at": expires_at,
+    })
+    return {"ok": True, "code": record}
