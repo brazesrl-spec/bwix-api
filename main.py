@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from extract import extract_bnb_pdf, detect_consolidated
-from ratios import compute_ratios, compute_dcf, SECTEUR_MULTIPLES
+from ratios import compute_ratios, compute_dcf, compute_score, SECTEUR_MULTIPLES
 
 # ── Config ──────────────────────────────────────────────────────────────────
 SUPABASE_URL = os.environ["SUPABASE_URL"].strip()
@@ -231,6 +231,9 @@ async def create_analyse(
             'score_sante': 50,
         }
 
+    # Deterministic score from ratios (not Claude)
+    score_sante = compute_score(ratios)
+
     # Build full analysis payload
     token = str(uuid.uuid4())
     full_data = {
@@ -239,6 +242,7 @@ async def create_analyse(
         'annee': extracted.get('annee_exercice'),
         'annee_precedente': extracted.get('annee_precedente'),
         'ratios': ratios,
+        'score_sante': score_sante,
         'ai_analysis': ai_analysis,
         'secteur': secteur,
         'is_consolidated': is_consolidated,
@@ -259,7 +263,7 @@ async def create_analyse(
             "token": token,
             "is_consolidated": is_consolidated,
             "annee": extracted.get('annee_exercice'),
-            "score_sante": ai_analysis.get('score_sante', 50),
+            "score_sante": score_sante,
             "unlocked": True,
             "freemium": {
                 "ebitda": ratios['rentabilite']['ebitda'],
@@ -281,13 +285,12 @@ async def create_analyse(
         }
 
     # Return freemium preview
-    score = ai_analysis.get('score_sante', 50)
     vr = ratios.get('valorisation_resume', {})
     preview = {
         "token": token,
         "is_consolidated": is_consolidated,
         "annee": extracted.get('annee_exercice'),
-        "score_sante": score,
+        "score_sante": score_sante,
         "freemium": {
             "ebitda": ratios['rentabilite']['ebitda'],
             "roe": ratios['rentabilite']['roe'],
@@ -321,7 +324,7 @@ async def get_analyse(token: str):
         "token": token,
         "annee": data.get('annee'),
         "is_consolidated": data.get('is_consolidated', False),
-        "score_sante": ai.get('score_sante', 50),
+        "score_sante": data.get('score_sante') or ai.get('score_sante', 50),
         "unlocked": unlocked,
         "freemium": {
             "ebitda": ratios.get('rentabilite', {}).get('ebitda'),

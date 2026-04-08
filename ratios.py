@@ -203,6 +203,52 @@ def compute_ratios(data: dict, secteur: str = None, params: dict = None) -> dict
     return ratios
 
 
+def compute_score(ratios: dict) -> int:
+    """Deterministic health score 0-100 from financial ratios."""
+    score = 50  # baseline
+    ind = ratios.get('indicators', {})
+
+    # +/- points based on indicator status
+    weights = {
+        'solvabilite': 15,
+        'liquidite_generale': 12,
+        'roe': 12,
+        'marge_ebitda': 12,
+        'marge_nette': 8,
+        'gearing': 8,
+    }
+    for key, w in weights.items():
+        status = (ind.get(key) or {}).get('status', 'neutral')
+        if status == 'bon':
+            score += w
+        elif status == 'alerte':
+            score -= w
+
+    # Positive EBITDA bonus
+    ebitda = ratios.get('rentabilite', {}).get('ebitda', 0) or 0
+    if ebitda > 0:
+        score += 5
+    elif ebitda < 0:
+        score -= 10
+
+    # Positive net result bonus
+    rent = ratios.get('rentabilite', {})
+    roe = rent.get('roe')
+    if roe is not None and roe > 0.05:
+        score += 5
+
+    # Debt coverage
+    struct = ratios.get('structure', {})
+    dettes_ebitda = struct.get('dettes_ebitda')
+    if dettes_ebitda is not None:
+        if dettes_ebitda < 2:
+            score += 5
+        elif dettes_ebitda > 5:
+            score -= 5
+
+    return max(0, min(100, score))
+
+
 def compute_dcf(comptes_list: list, wacc: float = 0.08, growth: float = 0.02) -> dict | None:
     """Simple DCF from multi-year data."""
     if len(comptes_list) < 2:
