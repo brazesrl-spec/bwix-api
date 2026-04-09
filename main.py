@@ -498,6 +498,7 @@ async def create_analyse(
         "ebitda_variation": ebitda_variation,
         "score_deductions": score_deductions,
         "valorisation": valorisation_unified,
+        "badges": badges,
     }
 
     # Admin mode → return full results immediately
@@ -576,6 +577,7 @@ async def get_analyse(token: str):
         "ebitda_variation": data.get('ebitda_variation'),
         "valorisation": valo,
         "score_deductions": data.get('score_deductions', []),
+        "badges": ratios.get('badges', {}),
         "is_consolidated": data.get('is_consolidated', False),
         "is_structure_particuliere": data.get('is_structure_particuliere', False),
         "score_sante": data.get('score_sante') or ai.get('score_sante', 50),
