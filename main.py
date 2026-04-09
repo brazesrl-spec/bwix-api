@@ -138,6 +138,21 @@ IMPORTANT :
 - Si schema_abrege=true, ne commente pas les marges (EBITDA, nette).
 - La dette nette fournie est la dette nette BANCAIRE retraitée.
 
+CONTEXTUALISATION DES RATIOS FAIBLES :
+Quand un ratio est sous le seuil sectoriel, ne pas se contenter de le signaler. Proposer systématiquement une explication structurelle probable :
+
+- Solvabilité faible : "Peut s'expliquer par une politique de distribution active aux associés, des remontées vers une holding, ou un financement important d'actifs. À contextualiser avec votre comptable."
+- BFR élevé (>1x CA) : "Structurel dans ce secteur (délais de paiement clients 60-90 jours). Surveillez le recouvrement et la rotation des stocks."
+- Dette/EBITDA élevé (>3x) : "Peut refléter un investissement récent (immo, matériel) plutôt qu'une fragilité structurelle. Vérifier la nature et la maturité des dettes."
+- Charges financières sans dette bancaire visible : "Peut indiquer du leasing, des emprunts intra-groupe ou des dettes hors bilan. Clarification conseillée."
+- ROE faible (<8%) : "Peut résulter d'une rémunération des dirigeants via management fees non visibles dans ce bilan, ou d'une année de transition."
+
+RÈGLES :
+- Toujours signaler le ratio en point d'attention si sous le seuil — ne jamais masquer.
+- Toujours proposer une explication probable.
+- Toujours terminer par "À vérifier avec votre comptable/fiduciaire".
+- Ne jamais affirmer avec certitude — BWIX lit un bilan, pas la réalité complète.
+
 Réponds UNIQUEMENT en JSON valide :
 {
   "synthese": "2-3 phrases résumé",
