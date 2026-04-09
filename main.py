@@ -209,6 +209,67 @@ async def health():
     return {"status": "ok"}
 
 
+# ── Free slots ──────────────────────────────────────────────────────────────
+
+@app.get("/api/free-slots")
+async def get_free_slots():
+    rows = await _supabase_select("settings", "key=eq.free_slots&select=value")
+    count = int(rows[0]["value"]) if rows else 0
+    return {"free_slots": max(0, count)}
+
+
+@app.post("/api/claim-free")
+async def claim_free_slot(request: Request):
+    """Claim a free analysis slot with email. Returns the analysis token."""
+    body = await request.json()
+    email = (body.get("email") or "").strip().lower()
+    analyse_token = body.get("token")
+
+    if not email or "@" not in email or not analyse_token:
+        raise HTTPException(400, "Email et token requis.")
+
+    # Check if email already used a free slot
+    existing = await _supabase_select("waitlist", f"email=eq.{email}&source=eq.free_slot&select=email")
+    if existing:
+        # Find their previous analysis
+        prev = await _supabase_select("analyses", f"email=eq.{email}&unlocked=eq.true&select=token&order=created_at.desc&limit=1")
+        if prev:
+            return {"ok": True, "already_used": True, "previous_token": prev[0]["token"],
+                    "message": "Cet email a d\u00e9j\u00e0 utilis\u00e9 son analyse gratuite."}
+        # Email used but no unlocked analysis found — allow retry
+        pass
+
+    # Check remaining slots
+    rows = await _supabase_select("settings", "key=eq.free_slots&select=value")
+    remaining = int(rows[0]["value"]) if rows else 0
+    if remaining <= 0:
+        raise HTTPException(410, "Plus d'analyses gratuites disponibles.")
+
+    # Check analysis exists
+    analyses = await _supabase_select("analyses", f"token=eq.{analyse_token}&select=token,unlocked")
+    if not analyses:
+        raise HTTPException(404, "Analyse introuvable.")
+    if analyses[0].get("unlocked"):
+        return {"ok": True, "message": "Analyse d\u00e9j\u00e0 d\u00e9bloqu\u00e9e."}
+
+    # Unlock analysis
+    await _supabase_update("analyses", f"token=eq.{analyse_token}", {"unlocked": True})
+
+    # Record email in waitlist
+    try:
+        await _supabase_insert("waitlist", {"email": email, "source": "free_slot"})
+    except Exception:
+        pass  # email might already exist in waitlist from before
+
+    # Decrement free slots
+    await _supabase_update("settings", "key=eq.free_slots", {"value": str(remaining - 1)})
+
+    # Send email
+    await send_unlock_email(email, analyse_token)
+
+    return {"ok": True, "free_slots_remaining": remaining - 1}
+
+
 @app.post("/api/analyse")
 async def create_analyse(
     file: UploadFile = File(...),
