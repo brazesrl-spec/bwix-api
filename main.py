@@ -563,6 +563,11 @@ async def get_analyse(token: str):
     ai = data.get('ai_analysis', {})
     vr = ratios.get('valorisation_resume', {})
 
+    # Compute badges on the fly (handles old analyses without stored badges)
+    stored_badges = ratios.get('badges', {})
+    if not stored_badges:
+        stored_badges = compute_badges(ratios, data.get('secteur', ''))
+
     valo = data.get('valorisation', {})
     result = {
         "token": token,
@@ -577,7 +582,7 @@ async def get_analyse(token: str):
         "ebitda_variation": data.get('ebitda_variation'),
         "valorisation": valo,
         "score_deductions": data.get('score_deductions', []),
-        "badges": ratios.get('badges', {}),
+        "badges": stored_badges,
         "is_consolidated": data.get('is_consolidated', False),
         "is_structure_particuliere": data.get('is_structure_particuliere', False),
         "score_sante": data.get('score_sante') or ai.get('score_sante', 50),
