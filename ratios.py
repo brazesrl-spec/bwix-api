@@ -65,6 +65,182 @@ SECTEUR_BENCHMARKS = {
 # Sectors where EBITDA volatility is expected (warning instead of malus)
 STRUCTURE_PARTICULIERE = {'Management / Holding', 'Immobilier / SCI', 'ASBL', 'Startup'}
 
+# Sector-specific thresholds for badges + valuation multiples
+SECTEUR_SEUILS = {
+    'Construction / BTP': {
+        'solvabilite': {'bon': 0.35, 'correct': 0.25},
+        'liquidite': {'bon': 1.5, 'correct': 1.0},
+        'roe': {'bon': 0.10, 'correct': 0.05},
+        'gearing': {'bon': 0.5, 'modere': 1.0},
+        'dette_ebitda': {'bon': 2, 'correct': 4},
+        'couverture': {'bon': 5, 'correct': 2},
+        'multiple_bas': 4, 'multiple_central': 5, 'multiple_haut': 6.5,
+        'label': 'BTP',
+    },
+    'Services': {
+        'solvabilite': {'bon': 0.40, 'correct': 0.30},
+        'liquidite': {'bon': 1.5, 'correct': 1.0},
+        'roe': {'bon': 0.15, 'correct': 0.08},
+        'gearing': {'bon': 0.3, 'modere': 0.7},
+        'dette_ebitda': {'bon': 1.5, 'correct': 3},
+        'couverture': {'bon': 6, 'correct': 3},
+        'multiple_bas': 5, 'multiple_central': 6, 'multiple_haut': 8,
+        'label': 'Services',
+    },
+    'Commerce': {
+        'solvabilite': {'bon': 0.30, 'correct': 0.20},
+        'liquidite': {'bon': 1.3, 'correct': 0.8},
+        'roe': {'bon': 0.12, 'correct': 0.06},
+        'gearing': {'bon': 0.5, 'modere': 1.0},
+        'dette_ebitda': {'bon': 2, 'correct': 4},
+        'couverture': {'bon': 4, 'correct': 2},
+        'multiple_bas': 4, 'multiple_central': 5, 'multiple_haut': 6,
+        'label': 'Commerce',
+    },
+    'Industrie': {
+        'solvabilite': {'bon': 0.35, 'correct': 0.25},
+        'liquidite': {'bon': 1.5, 'correct': 1.0},
+        'roe': {'bon': 0.10, 'correct': 0.05},
+        'gearing': {'bon': 0.5, 'modere': 1.0},
+        'dette_ebitda': {'bon': 2.5, 'correct': 4},
+        'couverture': {'bon': 5, 'correct': 2},
+        'multiple_bas': 5, 'multiple_central': 6, 'multiple_haut': 8,
+        'label': 'Industrie',
+    },
+    'Tech / SaaS': {
+        'solvabilite': {'bon': 0.50, 'correct': 0.35},
+        'liquidite': {'bon': 2.0, 'correct': 1.2},
+        'roe': {'bon': 0.20, 'correct': 0.10},
+        'gearing': {'bon': 0.2, 'modere': 0.5},
+        'dette_ebitda': {'bon': 1, 'correct': 2},
+        'couverture': {'bon': 8, 'correct': 4},
+        'multiple_bas': 8, 'multiple_central': 10, 'multiple_haut': 15,
+        'label': 'Tech',
+    },
+    # Structures particulières
+    'Management / Holding': {
+        'solvabilite': {'bon': 0.30, 'correct': 0.15},
+        'liquidite': {'bon': 1.0, 'correct': 0.5},
+        'roe': {'bon': 0.05, 'correct': 0.02},
+        'gearing': {'bon': 0.5, 'modere': 2.0},
+        'dette_ebitda': {'bon': 3, 'correct': 6},
+        'couverture': {'bon': 3, 'correct': 1},
+        'multiple_bas': 3, 'multiple_central': 4, 'multiple_haut': 6,
+        'label': 'Holding',
+    },
+    'Immobilier / SCI': {
+        'solvabilite': {'bon': 0.25, 'correct': 0.15},
+        'liquidite': {'bon': 1.0, 'correct': 0.5},
+        'roe': {'bon': 0.06, 'correct': 0.03},
+        'gearing': {'bon': 1.0, 'modere': 3.0},
+        'dette_ebitda': {'bon': 4, 'correct': 8},
+        'couverture': {'bon': 2, 'correct': 1},
+        'multiple_bas': 6, 'multiple_central': 8, 'multiple_haut': 12,
+        'label': 'Immobilier',
+    },
+}
+
+
+def _badge(val, seuil, higher_is_better=True):
+    """Return badge dict {badge, label, benchmark} based on sector thresholds."""
+    if val is None:
+        return {'badge': 'gris', 'label': 'N/A', 'benchmark': None}
+    bon = seuil.get('bon', seuil.get('modere', 0))
+    correct = seuil.get('correct', seuil.get('modere', 0))
+    if higher_is_better:
+        if val >= bon:
+            return {'badge': 'vert', 'label': 'Bon'}
+        elif val >= correct:
+            return {'badge': 'jaune', 'label': 'Correct'}
+        else:
+            return {'badge': 'rouge', 'label': 'Faible'}
+    else:
+        # Lower is better (gearing, dette_ebitda)
+        if val <= bon:
+            return {'badge': 'vert', 'label': 'Bon' if 'bon' in seuil else 'Faible'}
+        elif val <= correct or val <= seuil.get('modere', float('inf')):
+            return {'badge': 'jaune', 'label': 'Correct' if 'correct' in seuil else 'Mod\u00e9r\u00e9'}
+        else:
+            return {'badge': 'rouge', 'label': '\u00c9lev\u00e9'}
+
+
+def compute_badges(ratios: dict, secteur: str = '') -> dict:
+    """Compute colored badges for each ratio based on sector thresholds."""
+    seuils = SECTEUR_SEUILS.get(secteur, {})
+    if not seuils:
+        return {}
+
+    sect_label = seuils.get('label', secteur)
+    rent = ratios.get('rentabilite', {})
+    struct = ratios.get('structure', {})
+    liq = ratios.get('liquidite', {})
+
+    badges = {}
+
+    # Solvabilité (higher is better)
+    s = seuils.get('solvabilite')
+    if s:
+        v = struct.get('solvabilite')
+        b = _badge(v, s, True)
+        b['benchmark'] = f"Seuil {sect_label} : {int(s['correct']*100)}% minimum"
+        b['valeur'] = round(v * 100, 1) if v else None
+        badges['solvabilite'] = b
+
+    # Liquidité (higher is better)
+    s = seuils.get('liquidite')
+    if s:
+        v = liq.get('liquidite_generale')
+        b = _badge(v, s, True)
+        b['benchmark'] = f"Seuil {sect_label} : {s['correct']} minimum"
+        b['valeur'] = round(v, 2) if v else None
+        badges['liquidite'] = b
+
+    # ROE (higher is better)
+    s = seuils.get('roe')
+    if s:
+        v = rent.get('roe')
+        b = _badge(v, s, True)
+        b['benchmark'] = f"Seuil {sect_label} : {int(s['correct']*100)}% minimum"
+        b['valeur'] = round(v * 100, 1) if v else None
+        badges['roe'] = b
+
+    # Gearing (lower is better)
+    s = seuils.get('gearing')
+    if s:
+        v = struct.get('gearing')
+        if v is not None and v < 0:
+            badges['gearing'] = {'badge': 'vert', 'label': 'Tr\u00e9sorerie nette', 'valeur': round(v, 2),
+                                 'benchmark': f"Seuil {sect_label} : < {s['bon']}"}
+        else:
+            b = _badge(v, s, False)
+            b['benchmark'] = f"Seuil {sect_label} : < {s['bon']} id\u00e9al"
+            b['valeur'] = round(v, 2) if v else None
+            badges['gearing'] = b
+
+    # Dette/EBITDA (lower is better)
+    s = seuils.get('dette_ebitda')
+    if s:
+        v = struct.get('dettes_ebitda')
+        if v is not None and v < 0:
+            badges['dette_ebitda'] = {'badge': 'vert', 'label': 'Tr\u00e9sorerie nette', 'valeur': round(v, 2),
+                                      'benchmark': f"Seuil {sect_label} : < {s['bon']} ans"}
+        else:
+            b = _badge(v, s, False)
+            b['benchmark'] = f"Seuil {sect_label} : < {s['bon']} ans"
+            b['valeur'] = round(v, 1) if v else None
+            badges['dette_ebitda'] = b
+
+    # Couverture intérêts (higher is better)
+    s = seuils.get('couverture')
+    if s:
+        v = struct.get('couverture_interets')
+        b = _badge(v, s, True)
+        b['benchmark'] = f"Seuil {sect_label} : > {s['correct']}x"
+        b['valeur'] = round(v, 1) if v else None
+        badges['couverture'] = b
+
+    return badges
+
 
 def _safe_div(a, b):
     if not b:

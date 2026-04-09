@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from extract import extract_bnb_pdf, detect_consolidated
-from ratios import compute_ratios, compute_dcf, compute_score, SECTEUR_MULTIPLES, STRUCTURE_PARTICULIERE
+from ratios import compute_ratios, compute_dcf, compute_score, compute_badges, SECTEUR_MULTIPLES, SECTEUR_SEUILS, STRUCTURE_PARTICULIERE
 
 # ── Config ──────────────────────────────────────────────────────────────────
 import logging
@@ -97,6 +97,7 @@ def run_claude_analysis(ratios_data: dict, comptes_data: dict, secteur: str,
     if valorisation is None:
         valorisation = {}
 
+    badges = ratios_data.get('badges', {})
     ia_summary = {
         'secteur': secteur,
         'schema_abrege': ratios_data.get('schema_abrege', False),
@@ -104,7 +105,15 @@ def run_claude_analysis(ratios_data: dict, comptes_data: dict, secteur: str,
         'structure': ratios_data.get('structure', {}),
         'liquidite': ratios_data.get('liquidite', {}),
         'indicators': ratios_data.get('indicators', {}),
+        'badges_sectoriels': badges,
     }
+
+    # Build benchmarks context for Claude
+    benchmarks_lines = []
+    for k, b in badges.items():
+        if b.get('benchmark'):
+            benchmarks_lines.append(f"- {k}: valeur={b.get('valeur')}, badge={b.get('badge')}, {b['benchmark']}")
+    benchmarks_block = "\nBENCHMARKS SECTORIELS (" + secteur + ") :\n" + "\n".join(benchmarks_lines) if benchmarks_lines else ""
 
     valo_block = f"""
 VALORISATIONS (ne pas recalculer) :
@@ -119,6 +128,7 @@ VALORISATIONS (ne pas recalculer) :
         f"Données comptables :\n{json.dumps(comptes_data, indent=2, ensure_ascii=False)}\n\n"
         f"Ratios :\n{json.dumps(ia_summary, indent=2, ensure_ascii=False)}\n\n"
         f"{valo_block}"
+        f"{benchmarks_block}"
     )
 
     message = client.messages.create(
@@ -349,9 +359,18 @@ async def create_analyse(
         ebitda_reference_label = f"{annee_n} seul"
 
     secteur_key = secteur or ''
-    multiples = SECTEUR_MULTIPLES.get(secteur_key, {'low': 4, 'high': 8, 'default': 5})
+    seuils = SECTEUR_SEUILS.get(secteur_key, {})
+    # Use sector-specific multiples if available, fallback to SECTEUR_MULTIPLES
+    if seuils:
+        multiple = seuils.get('multiple_central', 5)
+        mult_low = seuils.get('multiple_bas', 4)
+        mult_high = seuils.get('multiple_haut', 8)
+    else:
+        multiples = SECTEUR_MULTIPLES.get(secteur_key, {'low': 4, 'high': 8, 'default': 5})
+        multiple = multiples['default']
+        mult_low = multiples['low']
+        mult_high = multiples['high']
     dette_nette = ratios['structure']['dette_nette']
-    multiple = multiples['default']
 
     ev_ebitda = round(ebitda_reference * multiple, 2) if ebitda_reference > 0 else 0
     actif_net = ratios['valorisation']['valeur_capitaux_propres']
@@ -409,6 +428,10 @@ async def create_analyse(
         'dcf_ev': dcf['valeur_dcf'] if has_n1 and dcf_equity else None,
         'dcf_equity': dcf_equity,
     }
+
+    # Compute sector-specific badges
+    badges = compute_badges(ratios, secteur)
+    ratios['badges'] = badges
 
     # Claude AI analysis (CORRECTION 3: strict prompt)
     try:
