@@ -416,7 +416,7 @@ async def create_analyse(
         'dette_nette': dette_nette,
     }
 
-    # Update ratios with unified values
+    # Update ratios with unified values (will be overwritten after synthese calc)
     ratios['valorisation_resume'] = {
         'ebitda': ebitda_reference,
         'ebitda_reference': ebitda_reference,
@@ -441,25 +441,63 @@ async def create_analyse(
     # Productivity per FTE
     productivite = compute_productivite(data_n, ratios, secteur)
 
-    # Build exercices array
+    # Build exercices array with per-year individual valorisation
     exercices = []
     if has_n1 and annee_n1:
+        ev_n1 = round(ebitda_n1 * multiple, 2) if ebitda_n1 and ebitda_n1 > 0 else 0
         exercices.append({
             'annee': annee_n1,
             'ebitda': ebitda_n1,
             'ratios': ratios_n1,
             'badges': badges_n1,
+            'valorisation': {
+                'ev_ebitda': ev_n1,
+                'actif_net': ratios_n1.get('valorisation', {}).get('valeur_capitaux_propres', 0) if ratios_n1 else 0,
+                'multiple_sectoriel': multiple,
+            },
         })
+    ev_n_solo = round(ebitda_n * multiple, 2) if ebitda_n > 0 else 0
     exercices.append({
         'annee': annee_n,
         'ebitda': ebitda_n,
         'ratios': ratios,
         'badges': badges,
         'productivite': productivite,
+        'valorisation': {
+            'ev_ebitda': ev_n_solo,
+            'actif_net': actif_net,
+            'multiple_sectoriel': multiple,
+        },
     })
 
     # Multi-year evolution
     evolution_data = compute_evolution(exercices)
+
+    # Build synthese object (uses averages)
+    all_ebitdas = [ex['ebitda'] for ex in exercices if ex.get('ebitda') is not None]
+    synthese_ebitda = round(sum(all_ebitdas) / len(all_ebitdas), 2) if all_ebitdas else ebitda_n
+    all_annees = sorted([ex['annee'] for ex in exercices if ex.get('annee')])
+    synthese_label = f"{all_annees[0]}-{all_annees[-1]}" if len(all_annees) >= 2 else str(all_annees[0]) if all_annees else ""
+
+    # Recalc valorisation on synthese EBITDA (average)
+    synthese_ev = round(synthese_ebitda * multiple, 2) if synthese_ebitda > 0 else 0
+    synthese_valo_vals = [v for v in [synthese_ev, actif_net] if v and v > 0]
+    if is_stable and dcf_equity and dcf_equity > 0:
+        synthese_valo_vals.append(dcf_equity)
+    if synthese_valo_vals:
+        synthese_moyenne = sum(synthese_valo_vals) / len(synthese_valo_vals)
+        synthese_fourchette_low = round(synthese_moyenne * 0.85, 2)
+        synthese_fourchette_high = round(synthese_moyenne * 1.15, 2)
+    else:
+        synthese_fourchette_low = fourchette_low
+        synthese_fourchette_high = fourchette_high
+
+    # Update unified valorisation with synthese values
+    valorisation_unified['ebitda_reference'] = synthese_ebitda
+    valorisation_unified['ebitda_reference_label'] = f"Moyenne {synthese_label}" if len(all_annees) >= 2 else synthese_label
+    valorisation_unified['ev_ebitda'] = synthese_ev
+    valorisation_unified['fourchette_basse'] = synthese_fourchette_low
+    valorisation_unified['fourchette_haute'] = synthese_fourchette_high
 
     # Claude AI analysis (CORRECTION 3: strict prompt)
     try:
@@ -489,12 +527,12 @@ async def create_analyse(
         'comptes_precedent': data_n1,
         'annee': annee_n,
         'annee_precedente': annee_n1,
-        'annees_disponibles': [annee_n1, annee_n] if has_n1 else [annee_n],
+        'annees_disponibles': sorted([ex['annee'] for ex in exercices if ex.get('annee')]),
         'nb_exercices': nb_exercices,
         'ebitda_n': ebitda_n,
         'ebitda_n1': ebitda_n1,
-        'ebitda_reference': ebitda_reference,
-        'ebitda_reference_label': ebitda_reference_label,
+        'ebitda_reference': synthese_ebitda,
+        'ebitda_reference_label': valorisation_unified['ebitda_reference_label'],
         'ebitda_variation': ebitda_variation,
         'valorisation': valorisation_unified,
         'ratios': ratios,
@@ -507,6 +545,25 @@ async def create_analyse(
         'exercices': exercices,
         'productivite': productivite,
         'evolution': evolution_data,
+        'synthese': {
+            'annees': sorted([ex['annee'] for ex in exercices if ex.get('annee')]),
+            'label': synthese_label,
+            'ebitda_moyen': synthese_ebitda,
+            'score': score_sante,
+            'score_deductions': score_deductions,
+            'valorisation': {
+                'ebitda_reference': synthese_ebitda,
+                'ebitda_reference_label': valorisation_unified['ebitda_reference_label'],
+                'ev_ebitda': synthese_ev,
+                'dcf': dcf_equity,
+                'actif_net': actif_net,
+                'fourchette_basse': synthese_fourchette_low,
+                'fourchette_haute': synthese_fourchette_high,
+                'multiple_sectoriel': multiple,
+            },
+            'evolution_ratios': evolution_data.get('evolution_ratios', {}),
+            'tendances': evolution_data.get('tendances', {}),
+        },
     }
 
     # Store in Supabase
@@ -651,6 +708,7 @@ async def get_analyse(token: str):
             "exercices": data.get('exercices', []),
             "productivite": data.get('productivite'),
             "evolution": data.get('evolution', {}),
+            "synthese": data.get('synthese', {}),
         }
 
     return result
