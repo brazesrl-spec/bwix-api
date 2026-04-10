@@ -714,6 +714,153 @@ async def get_analyse(token: str):
     return result
 
 
+# ── Add exercice ────────────────────────────────────────────────────────────
+
+@app.post("/api/analyse/add-exercice")
+async def add_exercice(
+    file: UploadFile = File(...),
+    token: str = Form(...),
+    secteur: str = Form(""),
+):
+    """Add a new exercise to an existing analysis."""
+    if not file.filename.lower().endswith('.pdf'):
+        raise HTTPException(400, "Seuls les fichiers PDF sont acceptés.")
+
+    # Load existing analysis
+    rows = await _supabase_select("analyses", f"token=eq.{token}&select=*")
+    if not rows:
+        raise HTTPException(404, "Analyse introuvable.")
+    row = rows[0]
+    if not row.get("unlocked"):
+        raise HTTPException(403, "Analyse non débloquée.")
+
+    existing_data = row["data_json"] if isinstance(row["data_json"], dict) else json.loads(row["data_json"])
+    existing_exercices = existing_data.get('exercices', [])
+    existing_annees = set(ex.get('annee') for ex in existing_exercices if ex.get('annee'))
+
+    # Parse new PDF
+    content = await file.read()
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
+    try:
+        extracted = extract_bnb_pdf(tmp_path)
+    finally:
+        os.unlink(tmp_path)
+
+    if 'error' in extracted.get('exercice', {}):
+        raise HTTPException(422, f"Erreur d'extraction : {extracted['exercice']['error']}")
+
+    secteur_key = secteur or existing_data.get('secteur', '')
+
+    # Process new years, detect duplicates
+    new_exercices = []
+    duplicates = []
+    for label, data_ex in [('exercice', extracted['exercice']), ('exercice_precedent', extracted['exercice_precedent'])]:
+        annee = extracted.get('annee_exercice') if label == 'exercice' else extracted.get('annee_precedente')
+        if not annee:
+            continue
+        has_data = any(v for k, v in data_ex.items() if k not in ('_ca_is_marge_brute',) and v)
+        if not has_data:
+            continue
+        if annee in existing_annees:
+            duplicates.append(annee)
+            continue
+
+        ratios_ex = compute_ratios(data_ex, secteur_key)
+        badges_ex = compute_badges(ratios_ex, secteur_key)
+        ebitda_ex = ratios_ex['rentabilite']['ebitda']
+        seuils = SECTEUR_SEUILS.get(secteur_key, {})
+        multiple = seuils.get('multiple_central', 5) if seuils else 5
+        productivite_ex = compute_productivite(data_ex, ratios_ex, secteur_key)
+
+        new_exercices.append({
+            'annee': annee,
+            'ebitda': ebitda_ex,
+            'ratios': ratios_ex,
+            'badges': badges_ex,
+            'productivite': productivite_ex,
+            'valorisation': {
+                'ev_ebitda': round(ebitda_ex * multiple, 2) if ebitda_ex > 0 else 0,
+                'actif_net': ratios_ex['valorisation']['valeur_capitaux_propres'],
+                'multiple_sectoriel': multiple,
+            },
+        })
+
+    if not new_exercices:
+        return {
+            "warning": "doublon",
+            "annees_deja_presentes": duplicates,
+            "annees_nouvelles": [],
+        }
+
+    # Merge exercices and sort by year
+    all_exercices = existing_exercices + new_exercices
+    all_exercices.sort(key=lambda e: e.get('annee', 0))
+
+    # Recalculate synthese
+    all_ebitdas = [ex['ebitda'] for ex in all_exercices if ex.get('ebitda') is not None]
+    synthese_ebitda = round(sum(all_ebitdas) / len(all_ebitdas), 2) if all_ebitdas else 0
+    all_annees = sorted([ex['annee'] for ex in all_exercices if ex.get('annee')])
+    synthese_label = f"{all_annees[0]}-{all_annees[-1]}" if len(all_annees) >= 2 else str(all_annees[0])
+
+    seuils = SECTEUR_SEUILS.get(secteur_key, {})
+    multiple = seuils.get('multiple_central', 5) if seuils else 5
+    synthese_ev = round(synthese_ebitda * multiple, 2) if synthese_ebitda > 0 else 0
+    actif_net = all_exercices[-1]['ratios']['valorisation']['valeur_capitaux_propres'] if all_exercices else 0
+    dette_nette = all_exercices[-1]['ratios']['structure']['dette_nette'] if all_exercices else 0
+
+    valo_vals = [v for v in [synthese_ev, actif_net] if v and v > 0]
+    if valo_vals:
+        moyenne_valo = sum(valo_vals) / len(valo_vals)
+        fourchette_low = round(moyenne_valo * 0.85, 2)
+        fourchette_high = round(moyenne_valo * 1.15, 2)
+    else:
+        fourchette_low = fourchette_high = 0
+
+    evolution_data = compute_evolution(all_exercices)
+
+    # Update existing data
+    existing_data['exercices'] = all_exercices
+    existing_data['nb_exercices'] = len(all_exercices)
+    existing_data['annees_disponibles'] = all_annees
+    existing_data['ebitda_reference'] = synthese_ebitda
+    existing_data['ebitda_reference_label'] = f"Moyenne {synthese_label}"
+    existing_data['evolution'] = evolution_data
+    existing_data['valorisation'] = {
+        'ebitda_reference': synthese_ebitda,
+        'ebitda_reference_label': f"Moyenne {synthese_label}",
+        'nb_exercices': len(all_exercices),
+        'multiple_sectoriel': multiple,
+        'ev_ebitda': synthese_ev,
+        'actif_net': actif_net,
+        'fourchette_basse': fourchette_low,
+        'fourchette_haute': fourchette_high,
+        'fourchette_methode': f"Moyenne EV/EBITDA + Actif net (\u00b115%)",
+        'dette_nette': dette_nette,
+    }
+    existing_data['synthese'] = {
+        'annees': all_annees,
+        'label': synthese_label,
+        'ebitda_moyen': synthese_ebitda,
+        'score': existing_data.get('score_sante', 50),
+        'valorisation': existing_data['valorisation'],
+        'evolution_ratios': evolution_data.get('evolution_ratios', {}),
+        'tendances': evolution_data.get('tendances', {}),
+    }
+
+    # Save to Supabase
+    await _supabase_update("analyses", f"token=eq.{token}", {"data_json": existing_data})
+
+    return {
+        "ok": True,
+        "annees_nouvelles": [ex['annee'] for ex in new_exercices],
+        "annees_deja_presentes": duplicates,
+        "nb_exercices": len(all_exercices),
+        "annees_disponibles": all_annees,
+    }
+
+
 # ── Stripe ──────────────────────────────────────────────────────────────────
 
 @app.post("/api/stripe/checkout")
