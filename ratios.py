@@ -498,11 +498,6 @@ def compute_score(ratios: dict, secteur: str = '', comptes_data: dict = None,
         deductions.append({'motif': 'Variation EBITDA N/N-1 > 30%', 'points': -4})
         score -= 4
 
-    # Less than 3 exercises
-    if nb_exercices < 3:
-        deductions.append({'motif': f'Seulement {nb_exercices} exercice(s) disponible(s)', 'points': -3})
-        score -= 3
-
     # Clamp to [0, 95]
     score = max(0, min(95, score))
 

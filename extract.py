@@ -93,8 +93,19 @@ def extract_bnb_pdf(pdf_path: str) -> dict:
     annee_exercice = None
     annee_precedente = None
 
+    denomination = None
+
     with pdfplumber.open(pdf_path) as pdf:
         page1_text = pdf.pages[0].extract_text() or ''
+
+        # Extract company name
+        m_denom = re.search(r'[Dd]\u00e9nomination\s*:\s*(.+)', page1_text)
+        if m_denom:
+            denomination = m_denom.group(1).strip()
+            # Sometimes form juridique is on same line — cut at common patterns
+            for cut in ['Forme juridique', 'Adresse']:
+                if cut in denomination:
+                    denomination = denomination[:denomination.index(cut)].strip()
 
         m = re.search(
             r'p[ée]riode\s+du\s+\d{2}-\d{2}-(\d{4})\s+au\s+\d{2}-\d{2}-(\d{4})',
@@ -175,6 +186,7 @@ def extract_bnb_pdf(pdf_path: str) -> dict:
         'exercice_precedent': data_n1,
         'annee_exercice': annee_exercice,
         'annee_precedente': annee_precedente,
+        'denomination': denomination,
     }
 
 

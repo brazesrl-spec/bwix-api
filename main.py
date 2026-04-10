@@ -383,20 +383,21 @@ async def create_analyse(
             ratios['valorisation']['dcf'] = dcf
             dcf_equity = round(dcf['valeur_dcf'] - dette_nette, 2)
 
-    # CORRECTION 6: fourchette cohérente
-    # Borne basse = min(ev_ebitda, actif_net) × 0.9
-    # Borne haute = max(ev_ebitda, dcf) × 1.05 if stable, else max(ev_ebitda, actif_net) × 1.05
-    vals_for_low = [v for v in [ev_ebitda, actif_net] if v and v > 0]
-    fourchette_low = round(min(vals_for_low) * 0.9, 2) if vals_for_low else 0
-
+    # Fourchette: moyenne des méthodes ±15%
     is_stable = ebitda_variation is None or ebitda_variation <= 0.30
+    valeurs_valo = [v for v in [ev_ebitda, actif_net] if v and v > 0]
     if is_stable and dcf_equity and dcf_equity > 0:
-        vals_for_high = [v for v in [ev_ebitda, dcf_equity] if v and v > 0]
-        fourchette_methode = "EV/EBITDA + DCF"
+        valeurs_valo.append(dcf_equity)
+        fourchette_methode = "Moyenne EV/EBITDA + DCF + Actif net (\u00b115%)"
     else:
-        vals_for_high = [v for v in [ev_ebitda, actif_net] if v and v > 0]
-        fourchette_methode = "EV/EBITDA + Actif net"
-    fourchette_high = round(max(vals_for_high) * 1.05, 2) if vals_for_high else 0
+        fourchette_methode = "Moyenne EV/EBITDA + Actif net (\u00b115%)"
+    if valeurs_valo:
+        moyenne_valo = sum(valeurs_valo) / len(valeurs_valo)
+        fourchette_low = round(moyenne_valo * 0.85, 2)
+        fourchette_high = round(moyenne_valo * 1.15, 2)
+    else:
+        fourchette_low = 0
+        fourchette_high = 0
 
     # Unified valorisation object
     valorisation_unified = {
@@ -454,7 +455,9 @@ async def create_analyse(
 
     # Build full analysis payload
     token = str(uuid.uuid4())
+    denomination = extracted.get('denomination', '')
     full_data = {
+        'denomination': denomination,
         'comptes': data_n,
         'comptes_precedent': data_n1,
         'annee': annee_n,
@@ -487,6 +490,7 @@ async def create_analyse(
 
     # Common response fields
     multi = {
+        "denomination": denomination,
         "nb_exercices": nb_exercices,
         "annee": annee_n,
         "annee_precedente": annee_n1,
@@ -571,6 +575,7 @@ async def get_analyse(token: str):
     valo = data.get('valorisation', {})
     result = {
         "token": token,
+        "denomination": data.get('denomination', ''),
         "annee": data.get('annee'),
         "annee_precedente": data.get('annee_precedente'),
         "annees_disponibles": data.get('annees_disponibles', [data.get('annee')]),
