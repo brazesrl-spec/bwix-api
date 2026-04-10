@@ -14,7 +14,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from extract import extract_bnb_pdf, detect_consolidated
-from ratios import compute_ratios, compute_dcf, compute_score, compute_badges, SECTEUR_MULTIPLES, SECTEUR_SEUILS, STRUCTURE_PARTICULIERE
+from ratios import (compute_ratios, compute_dcf, compute_score, compute_badges,
+                     compute_productivite, compute_evolution,
+                     SECTEUR_MULTIPLES, SECTEUR_SEUILS, STRUCTURE_PARTICULIERE)
 
 # ── Config ──────────────────────────────────────────────────────────────────
 import logging
@@ -434,6 +436,31 @@ async def create_analyse(
     badges = compute_badges(ratios, secteur)
     ratios['badges'] = badges
 
+    badges_n1 = compute_badges(ratios_n1, secteur) if ratios_n1 else {}
+
+    # Productivity per FTE
+    productivite = compute_productivite(data_n, ratios, secteur)
+
+    # Build exercices array
+    exercices = []
+    if has_n1 and annee_n1:
+        exercices.append({
+            'annee': annee_n1,
+            'ebitda': ebitda_n1,
+            'ratios': ratios_n1,
+            'badges': badges_n1,
+        })
+    exercices.append({
+        'annee': annee_n,
+        'ebitda': ebitda_n,
+        'ratios': ratios,
+        'badges': badges,
+        'productivite': productivite,
+    })
+
+    # Multi-year evolution
+    evolution_data = compute_evolution(exercices)
+
     # Claude AI analysis (CORRECTION 3: strict prompt)
     try:
         ai_analysis = run_claude_analysis(ratios, data_n, secteur, valorisation_unified)
@@ -477,6 +504,9 @@ async def create_analyse(
         'secteur': secteur,
         'is_structure_particuliere': secteur in STRUCTURE_PARTICULIERE,
         'is_consolidated': is_consolidated,
+        'exercices': exercices,
+        'productivite': productivite,
+        'evolution': evolution_data,
     }
 
     # Store in Supabase
@@ -503,6 +533,8 @@ async def create_analyse(
         "score_deductions": score_deductions,
         "valorisation": valorisation_unified,
         "badges": badges,
+        "productivite": productivite,
+        "exercices_count": nb_exercices,
     }
 
     # Admin mode → return full results immediately
@@ -529,6 +561,9 @@ async def create_analyse(
                 "ai_analysis": ai_analysis,
                 "valorisation_resume": ratios.get('valorisation_resume', {}),
                 "secteur": secteur,
+                "exercices": exercices,
+                "productivite": productivite,
+                "evolution": evolution_data,
             },
         }
 
@@ -588,6 +623,8 @@ async def get_analyse(token: str):
         "valorisation": valo,
         "score_deductions": data.get('score_deductions', []),
         "badges": stored_badges,
+        "productivite": data.get('productivite'),
+        "exercices_count": data.get('nb_exercices', 1),
         "is_consolidated": data.get('is_consolidated', False),
         "is_structure_particuliere": data.get('is_structure_particuliere', False),
         "score_sante": data.get('score_sante') or ai.get('score_sante', 50),
@@ -611,6 +648,9 @@ async def get_analyse(token: str):
             "ai_analysis": ai,
             "valorisation_resume": vr,
             "secteur": data.get('secteur', ''),
+            "exercices": data.get('exercices', []),
+            "productivite": data.get('productivite'),
+            "evolution": data.get('evolution', {}),
         }
 
     return result

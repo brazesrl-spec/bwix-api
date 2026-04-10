@@ -56,6 +56,8 @@ def extract_bnb_pdf(pdf_path: str) -> dict:
         '67/77': 'impots',
         '9904': 'resultat_net',
         '9905': 'resultat_net_a_affecter',
+        # Bilan social
+        '9087': 'etp_moyen',
     }
 
     ALL_CODES = sorted(CODE_MAP.keys(), key=lambda c: -len(c))

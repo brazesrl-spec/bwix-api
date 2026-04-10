@@ -74,6 +74,7 @@ SECTEUR_SEUILS = {
         'gearing': {'bon': 0.5, 'modere': 1.0},
         'dette_ebitda': {'bon': 2, 'correct': 4},
         'couverture': {'bon': 5, 'correct': 2},
+        'ebitda_par_etp': {'bon': 15000, 'correct': 8000},
         'multiple_bas': 4, 'multiple_central': 5, 'multiple_haut': 6.5,
         'label': 'BTP',
     },
@@ -84,6 +85,7 @@ SECTEUR_SEUILS = {
         'gearing': {'bon': 0.3, 'modere': 0.7},
         'dette_ebitda': {'bon': 1.5, 'correct': 3},
         'couverture': {'bon': 6, 'correct': 3},
+        'ebitda_par_etp': {'bon': 20000, 'correct': 10000},
         'multiple_bas': 5, 'multiple_central': 6, 'multiple_haut': 8,
         'label': 'Services',
     },
@@ -94,6 +96,7 @@ SECTEUR_SEUILS = {
         'gearing': {'bon': 0.5, 'modere': 1.0},
         'dette_ebitda': {'bon': 2, 'correct': 4},
         'couverture': {'bon': 4, 'correct': 2},
+        'ebitda_par_etp': {'bon': 12000, 'correct': 6000},
         'multiple_bas': 4, 'multiple_central': 5, 'multiple_haut': 6,
         'label': 'Commerce',
     },
@@ -104,6 +107,7 @@ SECTEUR_SEUILS = {
         'gearing': {'bon': 0.5, 'modere': 1.0},
         'dette_ebitda': {'bon': 2.5, 'correct': 4},
         'couverture': {'bon': 5, 'correct': 2},
+        'ebitda_par_etp': {'bon': 15000, 'correct': 8000},
         'multiple_bas': 5, 'multiple_central': 6, 'multiple_haut': 8,
         'label': 'Industrie',
     },
@@ -114,6 +118,7 @@ SECTEUR_SEUILS = {
         'gearing': {'bon': 0.2, 'modere': 0.5},
         'dette_ebitda': {'bon': 1, 'correct': 2},
         'couverture': {'bon': 8, 'correct': 4},
+        'ebitda_par_etp': {'bon': 40000, 'correct': 20000},
         'multiple_bas': 8, 'multiple_central': 10, 'multiple_haut': 15,
         'label': 'Tech',
     },
@@ -558,3 +563,97 @@ def compute_dcf(comptes_list: list, wacc: float = 0.08, growth: float = 0.02) ->
         'taux_croissance_historique': round(hist_growth, 4),
         'taux_croissance_projete': round(proj_growth, 4),
     }
+
+
+def compute_productivite(data: dict, ratios: dict, secteur: str = '') -> dict | None:
+    """Compute productivity per FTE if ETP data is available."""
+    etp = data.get('etp_moyen')
+    if not etp or etp <= 0:
+        return None
+
+    ebitda = ratios.get('rentabilite', {}).get('ebitda', 0) or 0
+    marge_brute = data.get('marge_brute', 0) or 0
+    ca = data.get('chiffre_affaires', 0) or 0
+    schema_abrege = bool(data.get('_ca_is_marge_brute'))
+
+    ebitda_par_etp = round(ebitda / etp, 2) if ebitda else None
+    marge_par_etp = round(marge_brute / etp, 2) if marge_brute else None
+    ca_par_etp = round(ca / etp, 2) if ca and not schema_abrege else None
+
+    # Badge for EBITDA/ETP
+    seuils = SECTEUR_SEUILS.get(secteur, {})
+    etp_seuil = seuils.get('ebitda_par_etp')
+    sect_label = seuils.get('label', secteur)
+    badge = 'gris'
+    if etp_seuil and ebitda_par_etp is not None:
+        if ebitda_par_etp >= etp_seuil['bon']:
+            badge = 'vert'
+        elif ebitda_par_etp >= etp_seuil['correct']:
+            badge = 'jaune'
+        else:
+            badge = 'rouge'
+
+    benchmark = f"Benchmark {sect_label} : ~{etp_seuil['bon']:,.0f}\u20ac/ETP" if etp_seuil else None
+
+    return {
+        'etp': round(etp, 1),
+        'ebitda_par_etp': ebitda_par_etp,
+        'marge_par_etp': marge_par_etp,
+        'ca_par_etp': ca_par_etp,
+        'badge_ebitda_etp': badge,
+        'benchmark': benchmark,
+    }
+
+
+def compute_evolution(exercices: list) -> dict:
+    """Compute evolution and tendencies across multiple exercises.
+
+    exercices: list of {annee, ratios, badges} dicts, sorted by year ascending.
+    Returns evolution_ratios and tendances.
+    """
+    if len(exercices) < 2:
+        return {'evolution_ratios': {}, 'tendances': {}}
+
+    ratio_keys = ['solvabilite', 'roe', 'liquidite', 'gearing', 'dette_ebitda', 'couverture']
+    ratio_paths = {
+        'solvabilite': lambda r: (r.get('structure') or {}).get('solvabilite'),
+        'roe': lambda r: (r.get('rentabilite') or {}).get('roe'),
+        'liquidite': lambda r: (r.get('liquidite') or {}).get('liquidite_generale'),
+        'gearing': lambda r: (r.get('structure') or {}).get('gearing'),
+        'dette_ebitda': lambda r: (r.get('structure') or {}).get('dettes_ebitda'),
+        'couverture': lambda r: (r.get('structure') or {}).get('couverture_interets'),
+    }
+
+    evolution = {}
+    tendances = {}
+
+    for key in ratio_keys:
+        path_fn = ratio_paths[key]
+        points = []
+        for ex in exercices:
+            val = path_fn(ex.get('ratios', {}))
+            badge_data = ex.get('badges', {}).get(key, {})
+            points.append({
+                'annee': ex['annee'],
+                'valeur': round(val * 100, 1) if val is not None and key in ('solvabilite', 'roe') else (round(val, 2) if val is not None else None),
+                'badge': badge_data.get('badge', 'gris'),
+            })
+
+        evolution[key] = points
+
+        # Tendance: compare last vs first
+        first_val = points[0].get('valeur')
+        last_val = points[-1].get('valeur')
+        if first_val is not None and last_val is not None and first_val != 0:
+            change_pct = abs(last_val - first_val) / abs(first_val)
+            higher_is_better = key not in ('gearing', 'dette_ebitda')
+            if change_pct < 0.02:
+                tendances[key] = 'stable'
+            elif last_val > first_val:
+                tendances[key] = 'amelioration' if higher_is_better else 'degradation'
+            else:
+                tendances[key] = 'degradation' if higher_is_better else 'amelioration'
+        else:
+            tendances[key] = 'stable'
+
+    return {'evolution_ratios': evolution, 'tendances': tendances}
