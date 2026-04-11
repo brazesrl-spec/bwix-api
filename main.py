@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse
 
 from extract import extract_bnb_pdf, detect_consolidated
 from ratios import (compute_ratios, compute_dcf, compute_score, compute_badges,
-                     compute_productivite, compute_evolution,
+                     compute_productivite, compute_evolution, compute_ebitda_pondere,
                      SECTEUR_MULTIPLES, SECTEUR_SEUILS, STRUCTURE_PARTICULIERE)
 
 # ── Config ──────────────────────────────────────────────────────────────────
@@ -473,31 +473,25 @@ async def create_analyse(
     # Multi-year evolution
     evolution_data = compute_evolution(exercices)
 
-    # Build synthese object (uses averages)
-    all_ebitdas = [ex['ebitda'] for ex in exercices if ex.get('ebitda') is not None]
-    synthese_ebitda = round(sum(all_ebitdas) / len(all_ebitdas), 2) if all_ebitdas else ebitda_n
+    # Build synthese with weighted EBITDA
     all_annees = sorted([ex['annee'] for ex in exercices if ex.get('annee')])
     synthese_label = f"{all_annees[0]}-{all_annees[-1]}" if len(all_annees) >= 2 else str(all_annees[0]) if all_annees else ""
 
-    # Recalc valorisation on synthese EBITDA (average)
+    ebitda_pond = compute_ebitda_pondere(exercices)
+    synthese_ebitda = ebitda_pond['ebitda_pondere']
+
+    # Fourchette: EBITDA pondéré × multiples sectoriels
+    synthese_fourchette_low = round(synthese_ebitda * mult_low, 2) if synthese_ebitda > 0 else 0
+    synthese_fourchette_high = round(synthese_ebitda * mult_high, 2) if synthese_ebitda > 0 else 0
     synthese_ev = round(synthese_ebitda * multiple, 2) if synthese_ebitda > 0 else 0
-    synthese_valo_vals = [v for v in [synthese_ev, actif_net] if v and v > 0]
-    if is_stable and dcf_equity and dcf_equity > 0:
-        synthese_valo_vals.append(dcf_equity)
-    if synthese_valo_vals:
-        synthese_moyenne = sum(synthese_valo_vals) / len(synthese_valo_vals)
-        synthese_fourchette_low = round(synthese_moyenne * 0.85, 2)
-        synthese_fourchette_high = round(synthese_moyenne * 1.15, 2)
-    else:
-        synthese_fourchette_low = fourchette_low
-        synthese_fourchette_high = fourchette_high
 
     # Update unified valorisation with synthese values
     valorisation_unified['ebitda_reference'] = synthese_ebitda
-    valorisation_unified['ebitda_reference_label'] = f"Moyenne {synthese_label}" if len(all_annees) >= 2 else synthese_label
+    valorisation_unified['ebitda_reference_label'] = f"EBITDA pond\u00e9r\u00e9 {synthese_label}"
     valorisation_unified['ev_ebitda'] = synthese_ev
     valorisation_unified['fourchette_basse'] = synthese_fourchette_low
     valorisation_unified['fourchette_haute'] = synthese_fourchette_high
+    valorisation_unified['ebitda_pondere_detail'] = ebitda_pond['poids_detail']
 
     # Claude AI analysis (CORRECTION 3: strict prompt)
     try:
@@ -546,9 +540,10 @@ async def create_analyse(
         'productivite': productivite,
         'evolution': evolution_data,
         'synthese': {
-            'annees': sorted([ex['annee'] for ex in exercices if ex.get('annee')]),
+            'annees': all_annees,
             'label': synthese_label,
-            'ebitda_moyen': synthese_ebitda,
+            'ebitda_pondere': synthese_ebitda,
+            'ebitda_pondere_detail': ebitda_pond['poids_detail'],
             'score': score_sante,
             'score_deductions': score_deductions,
             'valorisation': {
@@ -559,7 +554,9 @@ async def create_analyse(
                 'actif_net': actif_net,
                 'fourchette_basse': synthese_fourchette_low,
                 'fourchette_haute': synthese_fourchette_high,
-                'multiple_sectoriel': multiple,
+                'multiple_bas': mult_low,
+                'multiple_central': multiple,
+                'multiple_haut': mult_high,
             },
             'evolution_ratios': evolution_data.get('evolution_ratios', {}),
             'tendances': evolution_data.get('tendances', {}),
@@ -798,25 +795,23 @@ async def add_exercice(
     all_exercices = existing_exercices + new_exercices
     all_exercices.sort(key=lambda e: e.get('annee', 0))
 
-    # Recalculate synthese
-    all_ebitdas = [ex['ebitda'] for ex in all_exercices if ex.get('ebitda') is not None]
-    synthese_ebitda = round(sum(all_ebitdas) / len(all_ebitdas), 2) if all_ebitdas else 0
+    # Recalculate synthese with weighted EBITDA
     all_annees = sorted([ex['annee'] for ex in all_exercices if ex.get('annee')])
     synthese_label = f"{all_annees[0]}-{all_annees[-1]}" if len(all_annees) >= 2 else str(all_annees[0])
 
+    ebitda_pond = compute_ebitda_pondere(all_exercices)
+    synthese_ebitda = ebitda_pond['ebitda_pondere']
+
     seuils = SECTEUR_SEUILS.get(secteur_key, {})
     multiple = seuils.get('multiple_central', 5) if seuils else 5
+    mult_low = seuils.get('multiple_bas', 4) if seuils else 4
+    mult_high = seuils.get('multiple_haut', 8) if seuils else 8
     synthese_ev = round(synthese_ebitda * multiple, 2) if synthese_ebitda > 0 else 0
     actif_net = all_exercices[-1]['ratios']['valorisation']['valeur_capitaux_propres'] if all_exercices else 0
     dette_nette = all_exercices[-1]['ratios']['structure']['dette_nette'] if all_exercices else 0
 
-    valo_vals = [v for v in [synthese_ev, actif_net] if v and v > 0]
-    if valo_vals:
-        moyenne_valo = sum(valo_vals) / len(valo_vals)
-        fourchette_low = round(moyenne_valo * 0.85, 2)
-        fourchette_high = round(moyenne_valo * 1.15, 2)
-    else:
-        fourchette_low = fourchette_high = 0
+    fourchette_low = round(synthese_ebitda * mult_low, 2) if synthese_ebitda > 0 else 0
+    fourchette_high = round(synthese_ebitda * mult_high, 2) if synthese_ebitda > 0 else 0
 
     evolution_data = compute_evolution(all_exercices)
 
@@ -825,24 +820,27 @@ async def add_exercice(
     existing_data['nb_exercices'] = len(all_exercices)
     existing_data['annees_disponibles'] = all_annees
     existing_data['ebitda_reference'] = synthese_ebitda
-    existing_data['ebitda_reference_label'] = f"Moyenne {synthese_label}"
+    existing_data['ebitda_reference_label'] = f"EBITDA pond\u00e9r\u00e9 {synthese_label}"
     existing_data['evolution'] = evolution_data
     existing_data['valorisation'] = {
         'ebitda_reference': synthese_ebitda,
-        'ebitda_reference_label': f"Moyenne {synthese_label}",
+        'ebitda_reference_label': f"EBITDA pond\u00e9r\u00e9 {synthese_label}",
         'nb_exercices': len(all_exercices),
         'multiple_sectoriel': multiple,
         'ev_ebitda': synthese_ev,
         'actif_net': actif_net,
         'fourchette_basse': fourchette_low,
         'fourchette_haute': fourchette_high,
-        'fourchette_methode': f"Moyenne EV/EBITDA + Actif net (\u00b115%)",
+        'multiple_bas': mult_low,
+        'multiple_haut': mult_high,
+        'ebitda_pondere_detail': ebitda_pond['poids_detail'],
         'dette_nette': dette_nette,
     }
     existing_data['synthese'] = {
         'annees': all_annees,
         'label': synthese_label,
-        'ebitda_moyen': synthese_ebitda,
+        'ebitda_pondere': synthese_ebitda,
+        'ebitda_pondere_detail': ebitda_pond['poids_detail'],
         'score': existing_data.get('score_sante', 50),
         'valorisation': existing_data['valorisation'],
         'evolution_ratios': evolution_data.get('evolution_ratios', {}),

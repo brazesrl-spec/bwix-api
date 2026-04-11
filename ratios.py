@@ -509,6 +509,56 @@ def compute_score(ratios: dict, secteur: str = '', comptes_data: dict = None,
     return {'score': score, 'score_deductions': deductions}
 
 
+POIDS_EBITDA = {
+    1: [1.0],
+    2: [0.35, 0.65],
+    3: [0.20, 0.30, 0.50],
+    4: [0.10, 0.20, 0.30, 0.40],
+    5: [0.05, 0.10, 0.20, 0.30, 0.35],
+}
+
+
+def compute_ebitda_pondere(exercices: list) -> dict:
+    """Compute weighted EBITDA from exercices sorted by year ascending.
+
+    Returns {ebitda_pondere, poids_detail: [{annee, ebitda, poids, contribution}]}
+    """
+    ebitdas = [(ex.get('annee'), ex.get('ebitda', 0) or 0) for ex in exercices if ex.get('annee')]
+    n = len(ebitdas)
+    if n == 0:
+        return {'ebitda_pondere': 0, 'poids_detail': []}
+
+    weights = POIDS_EBITDA.get(n, POIDS_EBITDA[5])
+    # If more than 5, use last 5 with standard weights
+    if n > 5:
+        ebitdas = ebitdas[-5:]
+        weights = POIDS_EBITDA[5]
+        n = 5
+
+    # Pad weights if fewer entries
+    if len(weights) > n:
+        weights = weights[-n:]
+
+    total = 0
+    detail = []
+    for i, (annee, ebitda) in enumerate(ebitdas):
+        w = weights[i] if i < len(weights) else 0
+        contribution = round(ebitda * w, 2)
+        total += contribution
+        detail.append({
+            'annee': annee,
+            'ebitda': round(ebitda, 2),
+            'poids': w,
+            'poids_pct': int(w * 100),
+            'contribution': contribution,
+        })
+
+    return {
+        'ebitda_pondere': round(total, 2),
+        'poids_detail': detail,
+    }
+
+
 def compute_dcf(comptes_list: list, wacc: float = 0.08, growth: float = 0.02) -> dict | None:
     """Simple DCF from multi-year data."""
     if len(comptes_list) < 2:
