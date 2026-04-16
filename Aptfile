@@ -4,3 +4,7 @@ libgdk-pixbuf-2.0-0
 libffi-dev
 libcairo2
 libpangoft2-1.0-0
+libglib2.0-0
+libgobject-2.0-0
+libgtk-3-0
+libgdk-3-0
