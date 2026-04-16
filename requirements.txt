@@ -5,4 +5,4 @@ pdfplumber==0.11.4
 anthropic==0.43.0
 stripe==11.4.1
 python-multipart==0.0.20
-weasyprint==63.1
+reportlab==4.2.2

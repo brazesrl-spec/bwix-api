@@ -1,16 +1,50 @@
-"""BWIX — PDF report generation via WeasyPrint."""
+"""BWIX — PDF report generation via ReportLab."""
 
 import base64
 import io
+import math
 from datetime import datetime
 
-from weasyprint import HTML
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.platypus import (
+    SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, KeepTogether,
+    PageBreak,
+)
+from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
 
 
+# ── Colors ─────────────────────────────────────────────────────────────────
+BWIX_GREEN = colors.Color(0 / 255, 200 / 255, 150 / 255)
+BWIX_GREEN_LIGHT = colors.Color(232 / 255, 250 / 255, 244 / 255)
+YELLOW = colors.Color(245 / 255, 158 / 255, 11 / 255)
+RED = colors.Color(239 / 255, 68 / 255, 68 / 255)
+BLUE = colors.Color(59 / 255, 130 / 255, 246 / 255)
+GRAY = colors.Color(0.4, 0.4, 0.4)
+LIGHT_GRAY = colors.Color(0.95, 0.95, 0.95)
+DARK = colors.Color(0.1, 0.1, 0.1)
+
+BADGE_COLORS = {
+    "vert": BWIX_GREEN,
+    "jaune": YELLOW,
+    "rouge": RED,
+    "gris": GRAY,
+}
+BADGE_BG = {
+    "vert": BWIX_GREEN_LIGHT,
+    "jaune": colors.Color(254 / 255, 249 / 255, 231 / 255),
+    "rouge": colors.Color(253 / 255, 236 / 255, 236 / 255),
+    "gris": LIGHT_GRAY,
+}
+
+
+# ── Formatters ─────────────────────────────────────────────────────────────
 def _fmt_eur(v):
     if v is None:
         return "N/A"
-    return f"{round(v):,}".replace(",", "\u202f") + "\u202f\u20ac"
+    return f"{round(v):,}\u202f\u20ac".replace(",", "\u202f")
 
 
 def _fmt_pct(v):
@@ -19,33 +53,8 @@ def _fmt_pct(v):
     return f"{v * 100:.1f}\u202f%"
 
 
-def _badge_style(badge_color):
-    colors = {
-        "vert": ("#00c896", "#e6faf4"),
-        "jaune": ("#b8860b", "#fef9e7"),
-        "rouge": ("#c0392b", "#fdecec"),
-        "gris": ("#666", "#f0f0f0"),
-    }
-    fg, bg = colors.get(badge_color, ("#666", "#f0f0f0"))
-    return f"background:{bg};color:{fg};padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600"
-
-
 def _badge_label(badge_color):
     return {"vert": "Bon", "jaune": "Correct", "rouge": "Faible", "gris": "N/A"}.get(badge_color, "N/A")
-
-
-def _score_svg(score):
-    """Generate an SVG gauge for the health score."""
-    color = "#00c896" if score >= 70 else "#ffb432" if score >= 50 else "#ff8c00" if score >= 30 else "#ef4444"
-    offset = 327 - (score / 100) * 327
-    return f"""<svg width="100" height="100" viewBox="0 0 120 120">
-      <circle cx="60" cy="60" r="52" fill="none" stroke="#e0e0e0" stroke-width="8"/>
-      <circle cx="60" cy="60" r="52" fill="none" stroke="{color}" stroke-width="8"
-        stroke-dasharray="327" stroke-dashoffset="{offset}" stroke-linecap="round"
-        transform="rotate(-90 60 60)"/>
-      <text x="60" y="55" text-anchor="middle" font-size="28" font-weight="700" fill="#1a1a1a">{score}</text>
-      <text x="60" y="72" text-anchor="middle" font-size="12" fill="#888">/100</text>
-    </svg>"""
 
 
 def _score_label(score):
@@ -55,101 +64,295 @@ def _score_label(score):
         return "Situation fragile"
     if score < 70:
         return "Situation correcte"
-    return "Bonne sant\u00e9"
+    return "Bonne sant\u00e9 financi\u00e8re"
 
 
-def _ratio_rows(data):
-    """Build ratio table rows from analysis data."""
+def _score_color(score):
+    if score >= 70:
+        return BWIX_GREEN
+    if score >= 50:
+        return YELLOW
+    if score >= 30:
+        return colors.Color(1, 140 / 255, 0)
+    return RED
+
+
+# ── Styles ─────────────────────────────────────────────────────────────────
+def _get_styles():
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle("BWIXTitle", parent=styles["Heading1"], fontSize=16, textColor=DARK,
+                              spaceAfter=2, fontName="Helvetica-Bold"))
+    styles.add(ParagraphStyle("BWIXSubtitle", parent=styles["Normal"], fontSize=10, textColor=GRAY,
+                              spaceAfter=10))
+    styles.add(ParagraphStyle("BWIXSmall", parent=styles["Normal"], fontSize=8, textColor=GRAY))
+    styles.add(ParagraphStyle("BWIXSection", parent=styles["Heading2"], fontSize=12, textColor=DARK,
+                              fontName="Helvetica-Bold", spaceBefore=14, spaceAfter=6,
+                              borderWidth=0, borderPadding=0))
+    styles.add(ParagraphStyle("BWIXBody", parent=styles["Normal"], fontSize=9, textColor=DARK,
+                              leading=13))
+    styles.add(ParagraphStyle("BWIXBodySmall", parent=styles["Normal"], fontSize=8, textColor=GRAY,
+                              leading=11))
+    styles.add(ParagraphStyle("BWIXCenter", parent=styles["Normal"], fontSize=13, textColor=DARK,
+                              fontName="Helvetica-Bold", alignment=TA_CENTER))
+    styles.add(ParagraphStyle("BWIXCenterSmall", parent=styles["Normal"], fontSize=8, textColor=GRAY,
+                              alignment=TA_CENTER))
+    styles.add(ParagraphStyle("BWIXBullet", parent=styles["Normal"], fontSize=9, textColor=DARK,
+                              leading=13, leftIndent=12, bulletIndent=0))
+    return styles
+
+
+# ── Header / Footer ────────────────────────────────────────────────────────
+def _header_footer(canvas_obj, doc):
+    canvas_obj.saveState()
+    w, h = A4
+    # Header
+    canvas_obj.setStrokeColor(BWIX_GREEN)
+    canvas_obj.setLineWidth(1.5)
+    canvas_obj.line(18 * mm, h - 14 * mm, w - 18 * mm, h - 14 * mm)
+    canvas_obj.setFont("Helvetica-Bold", 16)
+    canvas_obj.setFillColor(BWIX_GREEN)
+    canvas_obj.drawString(18 * mm, h - 12 * mm, "BWIX.")
+    canvas_obj.setFont("Helvetica", 8)
+    canvas_obj.setFillColor(GRAY)
+    canvas_obj.drawRightString(w - 18 * mm, h - 12 * mm, "bwix.app")
+    # Footer
+    canvas_obj.setStrokeColor(colors.Color(0.88, 0.88, 0.88))
+    canvas_obj.setLineWidth(0.5)
+    canvas_obj.line(18 * mm, 16 * mm, w - 18 * mm, 16 * mm)
+    canvas_obj.setFont("Helvetica", 6)
+    canvas_obj.setFillColor(GRAY)
+    now_str = datetime.now().strftime("%d/%m/%Y")
+    footer = f"\u00a9 BWIX.app \u2014 {now_str} \u2014 Analyse indicative, non contractuelle. Consultez votre fiduciaire ou conseiller juridique pour toute d\u00e9cision."
+    canvas_obj.drawCentredString(w / 2, 11 * mm, footer)
+    # Page number
+    canvas_obj.drawRightString(w - 18 * mm, 11 * mm, f"Page {doc.page}")
+    canvas_obj.restoreState()
+
+
+# ── Score gauge drawing ────────────────────────────────────────────────────
+def _draw_score_gauge(canvas_obj, x, y, score, size=60):
+    """Draw a circular score gauge at (x, y)."""
+    cx, cy = x + size / 2, y + size / 2
+    r = size / 2 - 4
+    # Background circle
+    canvas_obj.setStrokeColor(colors.Color(0.88, 0.88, 0.88))
+    canvas_obj.setLineWidth(5)
+    canvas_obj.circle(cx, cy, r, fill=0)
+    # Score arc
+    score_color = _score_color(score)
+    canvas_obj.setStrokeColor(score_color)
+    canvas_obj.setLineWidth(5)
+    sweep = (score / 100) * 360
+    canvas_obj.arc(cx - r, cy - r, cx + r, cy + r, startAng=90, extent=-sweep)
+    # Score text
+    canvas_obj.setFont("Helvetica-Bold", 18)
+    canvas_obj.setFillColor(DARK)
+    canvas_obj.drawCentredString(cx, cy - 2, str(score))
+    canvas_obj.setFont("Helvetica", 7)
+    canvas_obj.setFillColor(GRAY)
+    canvas_obj.drawCentredString(cx, cy - 12, "/100")
+
+
+# ── Section header with green underline ────────────────────────────────────
+def _section_header(text, styles):
+    return Paragraph(
+        f'<font color="#00c896">\u2501</font> {text}',
+        styles["BWIXSection"],
+    )
+
+
+# ── Build ratio table data ─────────────────────────────────────────────────
+def _build_ratio_table(data, styles):
     ratios = data.get("ratios", {})
     badges = ratios.get("badges", {})
     rent = ratios.get("rentabilite", {})
     struct = ratios.get("structure", {})
     liq = ratios.get("liquidite", {})
 
+    def _fval(v, fmt="eur"):
+        if v is None:
+            return "N/A"
+        if fmt == "eur":
+            return _fmt_eur(v)
+        if fmt == "pct":
+            return _fmt_pct(v)
+        if fmt == "ratio":
+            return f"{v:.2f}"
+        if fmt == "x":
+            return f"{v:.1f}x"
+        if fmt == "days":
+            return f"{int(v)}j"
+        return str(v)
+
     rows_def = [
-        ("EBITDA", _fmt_eur(rent.get("ebitda")), None, None),
-        ("Marge EBITDA", _fmt_pct(rent.get("marge_ebitda")), None, None),
-        ("Marge nette", _fmt_pct(rent.get("marge_nette")), None, None),
-        ("ROE", _fmt_pct(rent.get("roe")), badges.get("roe", {}), None),
-        ("ROA", _fmt_pct(rent.get("roa")), None, None),
-        ("Solvabilit\u00e9", _fmt_pct(struct.get("solvabilite")), badges.get("solvabilite", {}), None),
-        ("Liquidit\u00e9 g\u00e9n\u00e9rale", f"{struct.get('liquidite_generale', liq.get('liquidite_generale', 'N/A'))}" if isinstance(liq.get("liquidite_generale"), (int, float)) else "N/A", badges.get("liquidite", {}), None),
-        ("Gearing", f"{struct.get('gearing', 'N/A')}" if isinstance(struct.get("gearing"), (int, float)) else "N/A", badges.get("gearing", {}), None),
-        ("Dette nette / EBITDA", f"{struct.get('dettes_ebitda', 'N/A')}" if isinstance(struct.get("dettes_ebitda"), (int, float)) else "N/A", badges.get("dette_ebitda", {}), None),
-        ("Couverture int\u00e9r\u00eats", f"{struct.get('couverture_interets', 'N/A')}x" if isinstance(struct.get("couverture_interets"), (int, float)) else "N/A", badges.get("couverture", {}), None),
-        ("BFR", _fmt_eur(liq.get("bfr")), None, None),
-        ("BFR (jours CA)", f"{int(liq.get('bfr_jours_ca', 0))}j" if liq.get("bfr_jours_ca") else "N/A", None, None),
+        ("EBITDA", _fval(rent.get("ebitda")), None),
+        ("Marge EBITDA", _fval(rent.get("marge_ebitda"), "pct"), None),
+        ("Marge nette", _fval(rent.get("marge_nette"), "pct"), None),
+        ("ROE", _fval(rent.get("roe"), "pct"), badges.get("roe")),
+        ("ROA", _fval(rent.get("roa"), "pct"), None),
+        ("Solvabilit\u00e9", _fval(struct.get("solvabilite"), "pct"), badges.get("solvabilite")),
+        ("Liquidit\u00e9 g\u00e9n\u00e9rale", _fval(liq.get("liquidite_generale"), "ratio"), badges.get("liquidite")),
+        ("Gearing", _fval(struct.get("gearing"), "ratio"), badges.get("gearing")),
+        ("Dette nette / EBITDA", _fval(struct.get("dettes_ebitda"), "x"), badges.get("dette_ebitda")),
+        ("Couverture int\u00e9r\u00eats", _fval(struct.get("couverture_interets"), "x"), badges.get("couverture")),
+        ("BFR", _fval(liq.get("bfr")), None),
+        ("BFR (jours CA)", _fval(liq.get("bfr_jours_ca"), "days"), None),
     ]
 
-    # Fix liquidite display
-    liq_val = liq.get("liquidite_generale")
-    rows_def[6] = ("Liquidit\u00e9 g\u00e9n\u00e9rale", f"{liq_val:.2f}" if isinstance(liq_val, (int, float)) else "N/A", badges.get("liquidite", {}), None)
-    gearing_val = struct.get("gearing")
-    rows_def[7] = ("Gearing", f"{gearing_val:.2f}" if isinstance(gearing_val, (int, float)) else "N/A", badges.get("gearing", {}), None)
-    de_val = struct.get("dettes_ebitda")
-    rows_def[8] = ("Dette nette / EBITDA", f"{de_val:.1f}x" if isinstance(de_val, (int, float)) else "N/A", badges.get("dette_ebitda", {}), None)
-    ci_val = struct.get("couverture_interets")
-    rows_def[9] = ("Couverture int\u00e9r\u00eats", f"{ci_val:.1f}x" if isinstance(ci_val, (int, float)) else "N/A", badges.get("couverture", {}), None)
+    header = [
+        Paragraph("<b>Ratio</b>", styles["BWIXBodySmall"]),
+        Paragraph("<b>Valeur</b>", styles["BWIXBodySmall"]),
+        Paragraph("<b>Statut</b>", styles["BWIXBodySmall"]),
+        Paragraph("<b>Benchmark</b>", styles["BWIXBodySmall"]),
+    ]
+    table_data = [header]
 
-    html = ""
-    for label, value, badge_data, _ in rows_def:
-        badge_html = ""
-        bench_html = ""
-        if badge_data and badge_data.get("badge"):
-            style = _badge_style(badge_data["badge"])
-            blabel = badge_data.get("label", _badge_label(badge_data["badge"]))
-            badge_html = f'<span style="{style}">{blabel}</span>'
-            if badge_data.get("benchmark"):
-                bench_html = f'<span style="font-size:10px;color:#888">{badge_data["benchmark"]}</span>'
-        html += f"""<tr>
-          <td style="padding:6px 10px;border-bottom:1px solid #eee;font-size:12px">{label}</td>
-          <td style="padding:6px 10px;border-bottom:1px solid #eee;font-size:12px;font-weight:600;text-align:right">{value}</td>
-          <td style="padding:6px 10px;border-bottom:1px solid #eee;text-align:center">{badge_html}</td>
-          <td style="padding:6px 10px;border-bottom:1px solid #eee">{bench_html}</td>
-        </tr>"""
-    return html
+    row_colors = []
+    for i, (label, value, badge) in enumerate(rows_def):
+        badge_text = ""
+        bench_text = ""
+        if badge and badge.get("badge"):
+            bl = badge.get("label", _badge_label(badge["badge"]))
+            bc = {"vert": "#00c896", "jaune": "#b8860b", "rouge": "#c0392b", "gris": "#666"}.get(badge["badge"], "#666")
+            badge_text = f'<font color="{bc}"><b>{bl}</b></font>'
+            row_colors.append((i + 1, badge["badge"]))
+            if badge.get("benchmark"):
+                bench_text = badge["benchmark"]
+        else:
+            row_colors.append((i + 1, None))
 
+        table_data.append([
+            Paragraph(label, styles["BWIXBody"]),
+            Paragraph(f"<b>{value}</b>", styles["BWIXBody"]),
+            Paragraph(badge_text, styles["BWIXBody"]),
+            Paragraph(bench_text, styles["BWIXBodySmall"]),
+        ])
 
-def _evolution_rows(data):
-    """Build N vs N-1 evolution rows if available."""
-    exercices = data.get("exercices", [])
-    if len(exercices) < 2:
-        return ""
-    # Compare last two exercices
-    prev = exercices[-2]
-    curr = exercices[-1]
-    prev_r = prev.get("ratios", {}).get("rentabilite", {})
-    curr_r = curr.get("ratios", {}).get("rentabilite", {})
+    col_widths = [120, 80, 55, None]
+    available = A4[0] - 36 * mm
+    col_widths[3] = available - sum(w for w in col_widths[:3])
 
-    rows = []
-    for label, key in [("EBITDA", "ebitda"), ("ROE", "roe"), ("Marge EBITDA", "marge_ebitda")]:
-        v_prev = prev_r.get(key)
-        v_curr = curr_r.get(key)
-        if v_prev is not None and v_curr is not None:
-            if key == "ebitda":
-                fmt = _fmt_eur
-            else:
-                fmt = _fmt_pct
-            arrow = "\u2191" if v_curr > v_prev else "\u2193" if v_curr < v_prev else "\u2192"
-            rows.append(f"<tr><td style='padding:4px 10px;font-size:11px'>{label}</td>"
-                        f"<td style='padding:4px 10px;font-size:11px;text-align:right'>{fmt(v_prev)}</td>"
-                        f"<td style='padding:4px 10px;font-size:11px;text-align:center'>{arrow}</td>"
-                        f"<td style='padding:4px 10px;font-size:11px;text-align:right;font-weight:600'>{fmt(v_curr)}</td></tr>")
+    t = Table(table_data, colWidths=col_widths, repeatRows=1)
+    style_cmds = [
+        ("BACKGROUND", (0, 0), (-1, 0), LIGHT_GRAY),
+        ("TEXTCOLOR", (0, 0), (-1, 0), GRAY),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("LINEBELOW", (0, 0), (-1, -1), 0.5, colors.Color(0.9, 0.9, 0.9)),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ("ALIGN", (2, 0), (2, -1), "CENTER"),
+    ]
+    # Alternate row shading
+    for i in range(2, len(table_data), 2):
+        style_cmds.append(("BACKGROUND", (0, i), (-1, i), colors.Color(0.98, 0.98, 0.98)))
 
-    if not rows:
-        return ""
-    annee_prev = prev.get("annee", "N-1")
-    annee_curr = curr.get("annee", "N")
-    return f"""<table style="width:100%;border-collapse:collapse;margin-top:8px">
-      <tr style="background:#f8f8f8"><th style="padding:4px 10px;font-size:11px;text-align:left">Ratio</th>
-      <th style="padding:4px 10px;font-size:11px;text-align:right">{annee_prev}</th>
-      <th style="padding:4px 10px;font-size:11px;text-align:center">Evol.</th>
-      <th style="padding:4px 10px;font-size:11px;text-align:right">{annee_curr}</th></tr>
-      {"".join(rows)}</table>"""
+    t.setStyle(TableStyle(style_cmds))
+    return t
 
 
+# ── Build valuation detail table ───────────────────────────────────────────
+def _build_valo_table(valo, styles):
+    rows = [
+        ("EBITDA pond\u00e9r\u00e9", _fmt_eur(valo.get("ebitda_reference"))),
+        ("Multiple sectoriel", f"{valo.get('multiple_sectoriel', 'N/A')}x"),
+        ("EV/EBITDA", _fmt_eur(valo.get("ev_ebitda"))),
+        ("DCF (equity)", _fmt_eur(valo.get("dcf")) if valo.get("dcf") else "Non calculable"),
+        ("Actif net comptable", _fmt_eur(valo.get("actif_net"))),
+    ]
+    table_data = [[Paragraph(l, styles["BWIXBody"]), Paragraph(f"<b>{v}</b>", styles["BWIXBody"])] for l, v in rows]
+    t = Table(table_data, colWidths=[140, 140])
+    t.setStyle(TableStyle([
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("LINEBELOW", (0, 0), (-1, -1), 0.3, colors.Color(0.92, 0.92, 0.92)),
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+    ]))
+    return t
+
+
+# ── Build EBITDA pondere detail table ──────────────────────────────────────
+def _build_ebitda_detail(valo, styles):
+    detail = valo.get("ebitda_pondere_detail", [])
+    if not detail or len(detail) < 2:
+        return None
+    header = [
+        Paragraph("<b>Ann\u00e9e</b>", styles["BWIXBodySmall"]),
+        Paragraph("<b>EBITDA</b>", styles["BWIXBodySmall"]),
+        Paragraph("<b>Poids</b>", styles["BWIXBodySmall"]),
+        Paragraph("<b>Contribution</b>", styles["BWIXBodySmall"]),
+    ]
+    rows = [header]
+    for d in detail:
+        pct = d.get("poids_pct", int(d.get("poids", 0) * 100))
+        rows.append([
+            Paragraph(str(d["annee"]), styles["BWIXBodySmall"]),
+            Paragraph(_fmt_eur(d["ebitda"]), styles["BWIXBodySmall"]),
+            Paragraph(f"{pct}%", styles["BWIXBodySmall"]),
+            Paragraph(_fmt_eur(d["contribution"]), styles["BWIXBodySmall"]),
+        ])
+    t = Table(rows, colWidths=[60, 100, 50, 100])
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), LIGHT_GRAY),
+        ("FONTSIZE", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
+        ("ALIGN", (2, 0), (2, -1), "CENTER"),
+    ]))
+    return t
+
+
+# ── Diagnostic bullet list ─────────────────────────────────────────────────
+def _diag_list(title, items, color_hex, styles):
+    if not items:
+        return []
+    elements = [Paragraph(f'<font color="{color_hex}"><b>{title}</b></font>', styles["BWIXBody"])]
+    for item in items:
+        elements.append(Paragraph(f'\u2022 {item}', styles["BWIXBullet"]))
+    elements.append(Spacer(1, 6))
+    return elements
+
+
+# ── Productivity section ───────────────────────────────────────────────────
+def _build_productivity(prod, styles):
+    if not prod or not prod.get("etp") or prod["etp"] <= 0:
+        return []
+    elements = [_section_header(f"Productivit\u00e9 par employ\u00e9 ({prod['etp']} ETP)", styles)]
+    rows = [
+        ("EBITDA / ETP", _fmt_eur(prod.get("ebitda_par_etp"))),
+        ("Marge brute / ETP", _fmt_eur(prod.get("marge_par_etp"))),
+    ]
+    if prod.get("ca_par_etp"):
+        rows.append(("CA / ETP", _fmt_eur(prod["ca_par_etp"])))
+    table_data = [[Paragraph(l, styles["BWIXBody"]), Paragraph(f"<b>{v}</b>", styles["BWIXBody"])] for l, v in rows]
+    t = Table(table_data, colWidths=[140, 140])
+    t.setStyle(TableStyle([
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("LINEBELOW", (0, 0), (-1, -1), 0.3, colors.Color(0.92, 0.92, 0.92)),
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+    ]))
+    elements.append(t)
+    if prod.get("benchmark"):
+        elements.append(Spacer(1, 3))
+        elements.append(Paragraph(prod["benchmark"], styles["BWIXBodySmall"]))
+    return elements
+
+
+# ── Main PDF generation ────────────────────────────────────────────────────
 def generate_pdf(data: dict) -> bytes:
     """Generate a PDF report from analysis data. Returns PDF bytes."""
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4,
+        leftMargin=18 * mm, rightMargin=18 * mm,
+        topMargin=20 * mm, bottomMargin=22 * mm,
+    )
+    styles = _get_styles()
+    elements = []
+
     now = datetime.now()
     date_str = now.strftime("%d/%m/%Y")
     denomination = data.get("denomination", "Soci\u00e9t\u00e9")
@@ -160,307 +363,134 @@ def generate_pdf(data: dict) -> bytes:
     ai = data.get("ai_analysis", {})
     prod = data.get("productivite")
 
-    # Score SVG
-    score_svg = _score_svg(score)
-    score_label = _score_label(score)
+    # ── PAGE 1: Header + Score + Valorisation ──────────────────────────
+    elements.append(Paragraph("Rapport d'analyse financi\u00e8re", styles["BWIXTitle"]))
+    elements.append(Paragraph(f"<b>{denomination}</b>", styles["BWIXBody"]))
+    elements.append(Paragraph(
+        f"Exercices : {annees_str} \u2014 G\u00e9n\u00e9r\u00e9 le {date_str}",
+        styles["BWIXSubtitle"],
+    ))
+    elements.append(Paragraph(
+        "Rapport g\u00e9n\u00e9r\u00e9 par BWIX.app \u2014 Analyse financi\u00e8re automatis\u00e9e depuis le bilan officiel BNB",
+        styles["BWIXSmall"],
+    ))
+    elements.append(Spacer(1, 10))
 
-    # Ratio rows
-    ratio_html = _ratio_rows(data)
+    # Score as table layout (gauge will be drawn via afterFlowable)
+    score_color_hex = {True: "#00c896"}.get(score >= 70,
+                      {True: "#ffb432"}.get(score >= 50,
+                      {True: "#ff8c00"}.get(score >= 30, "#ef4444")))
+    score_text = f'<font size="22" color="{score_color_hex}"><b>{score}</b></font><font size="9" color="#999"> /100</font>'
+    score_label_text = _score_label(score)
+    score_table = Table([
+        [Paragraph(score_text, styles["BWIXBody"]),
+         Paragraph(f'<b>Score sant\u00e9</b><br/><font color="#666">{score_label_text}</font>', styles["BWIXBody"])],
+    ], colWidths=[80, 200])
+    score_table.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+    ]))
+    elements.append(score_table)
+    elements.append(Spacer(1, 8))
 
-    # Evolution
-    evolution_html = _evolution_rows(data)
+    # Valorisation box
+    fourchette_methode = valo.get("fourchette_methode", "")
+    elements.append(_section_header("Fourchette de valorisation", styles))
+    fourchette_text = f"{_fmt_eur(valo.get('fourchette_basse'))}  \u2014  {_fmt_eur(valo.get('fourchette_haute'))}"
+    elements.append(Paragraph(f'<font size="14"><b>{fourchette_text}</b></font>', styles["BWIXCenter"]))
+    if fourchette_methode:
+        elements.append(Paragraph(fourchette_methode, styles["BWIXCenterSmall"]))
+    elements.append(Spacer(1, 8))
 
-    # Productivity section
-    prod_html = ""
-    if prod and prod.get("etp") and prod["etp"] > 0:
-        badge_color = prod.get("badge_ebitda_etp", "gris")
-        style = _badge_style(badge_color)
-        prod_html = f"""
-        <div style="margin-top:24px;page-break-inside:avoid">
-          <h3 style="color:#1a1a1a;font-size:14px;margin-bottom:8px;border-bottom:2px solid #00c896;padding-bottom:4px">Productivit\u00e9 par employ\u00e9 ({prod['etp']} ETP)</h3>
-          <table style="width:100%;border-collapse:collapse">
-            <tr><td style="padding:6px 10px;font-size:12px">EBITDA / ETP</td>
-                <td style="padding:6px 10px;font-size:12px;font-weight:600;text-align:right">{_fmt_eur(prod.get('ebitda_par_etp'))}</td>
-                <td style="padding:6px 10px;text-align:center"><span style="{style}">{_badge_label(badge_color)}</span></td></tr>
-            <tr><td style="padding:6px 10px;font-size:12px">Marge brute / ETP</td>
-                <td style="padding:6px 10px;font-size:12px;font-weight:600;text-align:right">{_fmt_eur(prod.get('marge_par_etp'))}</td>
-                <td></td></tr>"""
-        if prod.get("ca_par_etp"):
-            prod_html += f"""<tr><td style="padding:6px 10px;font-size:12px">CA / ETP</td>
-                <td style="padding:6px 10px;font-size:12px;font-weight:600;text-align:right">{_fmt_eur(prod.get('ca_par_etp'))}</td>
-                <td></td></tr>"""
-        prod_html += "</table>"
-        if prod.get("benchmark"):
-            prod_html += f'<p style="font-size:10px;color:#888;margin-top:4px">{prod["benchmark"]}</p>'
-        prod_html += "</div>"
-
-    # AI diagnostic
-    def _list_html(items, color):
-        if not items:
-            return ""
-        lis = "".join(f'<li style="margin-bottom:4px;font-size:11px;line-height:1.5">{item}</li>' for item in items)
-        return f'<ul style="margin:0;padding-left:18px;border-left:3px solid {color}">{lis}</ul>'
-
-    points_forts = _list_html(ai.get("points_forts", []), "#00c896")
-    points_attention = _list_html(ai.get("points_attention", []), "#f59e0b")
-    risques = _list_html(ai.get("risques", []), "#ef4444")
-    recommandations = _list_html(ai.get("recommandations", []), "#3b82f6")
+    # Valuation detail table
+    elements.append(_build_valo_table(valo, styles))
+    elements.append(Spacer(1, 4))
 
     # EBITDA pondere detail
-    ebitda_detail_html = ""
-    detail = valo.get("ebitda_pondere_detail", [])
-    if detail and len(detail) > 1:
-        rows = "".join(
-            f"<tr><td style='padding:3px 8px;font-size:11px'>{d['annee']}</td>"
-            f"<td style='padding:3px 8px;font-size:11px;text-align:right'>{_fmt_eur(d['ebitda'])}</td>"
-            f"<td style='padding:3px 8px;font-size:11px;text-align:center'>{d.get('poids_pct', int(d.get('poids', 0) * 100))}%</td>"
-            f"<td style='padding:3px 8px;font-size:11px;text-align:right'>{_fmt_eur(d['contribution'])}</td></tr>"
-            for d in detail
-        )
-        ebitda_detail_html = f"""
-        <table style="width:100%;border-collapse:collapse;margin-top:6px;background:#f9f9f9;border-radius:4px">
-          <tr style="background:#f0f0f0"><th style="padding:3px 8px;font-size:10px;text-align:left">Ann\u00e9e</th>
-          <th style="padding:3px 8px;font-size:10px;text-align:right">EBITDA</th>
-          <th style="padding:3px 8px;font-size:10px;text-align:center">Poids</th>
-          <th style="padding:3px 8px;font-size:10px;text-align:right">Contribution</th></tr>
-          {rows}
-        </table>"""
+    ebitda_detail = _build_ebitda_detail(valo, styles)
+    if ebitda_detail:
+        elements.append(ebitda_detail)
+    elements.append(Spacer(1, 6))
 
-    # Fourchette methode
-    fourchette_methode = valo.get("fourchette_methode", "")
+    # ── PAGE 2: Ratios ─────────────────────────────────────────────────
+    elements.append(PageBreak())
+    elements.append(_section_header("Ratios financiers", styles))
+    elements.append(_build_ratio_table(data, styles))
+    elements.append(Spacer(1, 10))
 
-    html_content = f"""<!DOCTYPE html>
-<html lang="fr">
-<head>
-<meta charset="UTF-8">
-<style>
-  @page {{
-    size: A4;
-    margin: 20mm 18mm 25mm 18mm;
-    @top-left {{
-      content: "";
-    }}
-    @bottom-center {{
-      content: "";
-    }}
-  }}
-  @page :first {{
-    margin-top: 15mm;
-  }}
-  body {{
-    font-family: Helvetica, Arial, sans-serif;
-    color: #1a1a1a;
-    font-size: 12px;
-    line-height: 1.5;
-    margin: 0;
-    padding: 0;
-  }}
-  .page-header {{
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    border-bottom: 2px solid #00c896;
-    padding-bottom: 8px;
-    margin-bottom: 6px;
-  }}
-  .page-header-logo {{
-    font-size: 22px;
-    font-weight: 800;
-    color: #00c896;
-    letter-spacing: -0.5px;
-  }}
-  .page-header-url {{
-    font-size: 10px;
-    color: #999;
-  }}
-  .footer-line {{
-    position: fixed;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    text-align: center;
-    font-size: 8px;
-    color: #aaa;
-    padding: 6px 18mm;
-    border-top: 1px solid #e0e0e0;
-  }}
-  h2 {{
-    color: #1a1a1a;
-    font-size: 18px;
-    margin: 0 0 4px 0;
-  }}
-  h3 {{
-    color: #1a1a1a;
-    font-size: 14px;
-    margin: 16px 0 8px 0;
-  }}
-  .subtitle {{
-    font-size: 11px;
-    color: #888;
-    margin: 0 0 16px 0;
-  }}
-  .score-row {{
-    display: flex;
-    align-items: center;
-    gap: 20px;
-    margin: 16px 0;
-  }}
-  .score-info {{
-    flex: 1;
-  }}
-  .valo-box {{
-    background: #f8fffe;
-    border: 1px solid #c8ede4;
-    border-radius: 8px;
-    padding: 14px 18px;
-    margin: 12px 0;
-  }}
-  .valo-range {{
-    font-size: 16px;
-    font-weight: 700;
-    color: #1a1a1a;
-    text-align: center;
-  }}
-  .valo-label {{
-    font-size: 10px;
-    color: #888;
-    text-align: center;
-    margin-top: 4px;
-  }}
-  .diagnostic {{
-    page-break-inside: avoid;
-  }}
-  .diag-section {{
-    margin-bottom: 12px;
-  }}
-  .diag-section h4 {{
-    font-size: 12px;
-    margin: 8px 0 4px 0;
-    color: #555;
-  }}
-  .page-break {{
-    page-break-before: always;
-  }}
-</style>
-</head>
-<body>
+    # Evolution N vs N-1
+    exercices = data.get("exercices", [])
+    if len(exercices) >= 2:
+        prev = exercices[-2]
+        curr = exercices[-1]
+        prev_r = prev.get("ratios", {}).get("rentabilite", {})
+        curr_r = curr.get("ratios", {}).get("rentabilite", {})
+        evo_rows = []
+        for label, key in [("EBITDA", "ebitda"), ("ROE", "roe"), ("Marge EBITDA", "marge_ebitda")]:
+            v_prev = prev_r.get(key)
+            v_curr = curr_r.get(key)
+            if v_prev is not None and v_curr is not None:
+                fmt = _fmt_eur if key == "ebitda" else _fmt_pct
+                arrow = "\u2191" if v_curr > v_prev else "\u2193" if v_curr < v_prev else "\u2192"
+                evo_rows.append([
+                    Paragraph(label, styles["BWIXBodySmall"]),
+                    Paragraph(fmt(v_prev), styles["BWIXBodySmall"]),
+                    Paragraph(arrow, styles["BWIXBodySmall"]),
+                    Paragraph(f"<b>{fmt(v_curr)}</b>", styles["BWIXBodySmall"]),
+                ])
+        if evo_rows:
+            annee_prev = prev.get("annee", "N-1")
+            annee_curr = curr.get("annee", "N")
+            header = [
+                Paragraph("<b>Ratio</b>", styles["BWIXBodySmall"]),
+                Paragraph(f"<b>{annee_prev}</b>", styles["BWIXBodySmall"]),
+                Paragraph("<b>Evol.</b>", styles["BWIXBodySmall"]),
+                Paragraph(f"<b>{annee_curr}</b>", styles["BWIXBodySmall"]),
+            ]
+            evo_table = Table([header] + evo_rows, colWidths=[120, 100, 40, 100])
+            evo_table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), LIGHT_GRAY),
+                ("FONTSIZE", (0, 0), (-1, -1), 7),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+                ("TOPPADDING", (0, 0), (-1, -1), 2),
+                ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+                ("ALIGN", (2, 0), (2, -1), "CENTER"),
+                ("ALIGN", (3, 0), (3, -1), "RIGHT"),
+            ]))
+            elements.append(Spacer(1, 6))
+            elements.append(Paragraph("<b>\u00c9volution N vs N-1</b>", styles["BWIXBodySmall"]))
+            elements.append(Spacer(1, 3))
+            elements.append(evo_table)
 
-<!-- Header -->
-<div class="page-header">
-  <span class="page-header-logo">BWIX.</span>
-  <span class="page-header-url">bwix.app</span>
-</div>
+    # Productivity
+    prod_elements = _build_productivity(prod, styles)
+    if prod_elements:
+        elements.append(Spacer(1, 10))
+        elements.extend(prod_elements)
 
-<!-- Footer (fixed) -->
-<div class="footer-line">
-  &copy; BWIX.app &mdash; {date_str} &mdash; Analyse indicative, non contractuelle. Consultez votre fiduciaire ou conseiller juridique pour toute d&eacute;cision.
-</div>
+    # ── PAGE 3: Diagnostic ─────────────────────────────────────────────
+    elements.append(PageBreak())
+    elements.append(_section_header("Diagnostic financier", styles))
 
-<!-- Page 1: Header + Score + Valorisation -->
-<h2>Rapport d'analyse financi&egrave;re</h2>
-<p style="font-size:14px;font-weight:600;color:#333;margin:0">{denomination}</p>
-<p class="subtitle">Exercices : {annees_str} &mdash; G&eacute;n&eacute;r&eacute; le {date_str}</p>
-<p style="font-size:10px;color:#999;margin:-10px 0 16px 0">Rapport g&eacute;n&eacute;r&eacute; par BWIX.app &mdash; Analyse financi&egrave;re automatis&eacute;e depuis le bilan officiel BNB</p>
+    synthese = ai.get("synthese", "")
+    if synthese:
+        elements.append(Paragraph(synthese, styles["BWIXBody"]))
+        elements.append(Spacer(1, 10))
 
-<div class="score-row">
-  <div>{score_svg}</div>
-  <div class="score-info">
-    <div style="font-size:14px;font-weight:700">Score sant&eacute; : {score}/100</div>
-    <div style="font-size:12px;color:#666">{score_label}</div>
-  </div>
-</div>
+    elements.extend(_diag_list("Points forts", ai.get("points_forts", []), "#00c896", styles))
+    elements.extend(_diag_list("Points d'attention", ai.get("points_attention", []), "#b8860b", styles))
+    elements.extend(_diag_list("Risques", ai.get("risques", []), "#c0392b", styles))
+    elements.extend(_diag_list("Recommandations", ai.get("recommandations", []), "#3b82f6", styles))
 
-<div class="valo-box">
-  <div style="font-size:11px;color:#888;text-align:center;margin-bottom:4px">Fourchette de valorisation</div>
-  <div class="valo-range">{_fmt_eur(valo.get('fourchette_basse'))} &mdash; {_fmt_eur(valo.get('fourchette_haute'))}</div>
-  <div class="valo-label">{fourchette_methode}</div>
-  <table style="width:100%;border-collapse:collapse;margin-top:10px">
-    <tr>
-      <td style="padding:4px 8px;font-size:11px;color:#666">EBITDA pond&eacute;r&eacute;</td>
-      <td style="padding:4px 8px;font-size:11px;font-weight:600;text-align:right">{_fmt_eur(valo.get('ebitda_reference'))}</td>
-    </tr>
-    <tr>
-      <td style="padding:4px 8px;font-size:11px;color:#666">Multiple sectoriel</td>
-      <td style="padding:4px 8px;font-size:11px;font-weight:600;text-align:right">{valo.get('multiple_sectoriel', 'N/A')}x</td>
-    </tr>
-    <tr>
-      <td style="padding:4px 8px;font-size:11px;color:#666">EV/EBITDA</td>
-      <td style="padding:4px 8px;font-size:11px;font-weight:600;text-align:right">{_fmt_eur(valo.get('ev_ebitda'))}</td>
-    </tr>
-    <tr>
-      <td style="padding:4px 8px;font-size:11px;color:#666">DCF (equity)</td>
-      <td style="padding:4px 8px;font-size:11px;font-weight:600;text-align:right">{_fmt_eur(valo.get('dcf')) if valo.get('dcf') else 'Non calculable'}</td>
-    </tr>
-    <tr>
-      <td style="padding:4px 8px;font-size:11px;color:#666">Actif net comptable</td>
-      <td style="padding:4px 8px;font-size:11px;font-weight:600;text-align:right">{_fmt_eur(valo.get('actif_net'))}</td>
-    </tr>
-  </table>
-  {ebitda_detail_html}
-</div>
+    valo_comment = ai.get("valorisation_commentaire", "")
+    if valo_comment:
+        elements.append(Spacer(1, 6))
+        elements.append(Paragraph("<b>Commentaire valorisation</b>", styles["BWIXBody"]))
+        elements.append(Paragraph(valo_comment, styles["BWIXBody"]))
 
-<!-- Page 2: Ratios -->
-<div class="page-break"></div>
-<div class="page-header">
-  <span class="page-header-logo">BWIX.</span>
-  <span class="page-header-url">bwix.app</span>
-</div>
-
-<h3 style="border-bottom:2px solid #00c896;padding-bottom:4px">Ratios financiers</h3>
-<table style="width:100%;border-collapse:collapse">
-  <tr style="background:#f8f8f8">
-    <th style="padding:6px 10px;font-size:11px;text-align:left">Ratio</th>
-    <th style="padding:6px 10px;font-size:11px;text-align:right">Valeur</th>
-    <th style="padding:6px 10px;font-size:11px;text-align:center">Statut</th>
-    <th style="padding:6px 10px;font-size:11px;text-align:left">Benchmark</th>
-  </tr>
-  {ratio_html}
-</table>
-
-{evolution_html}
-
-{prod_html}
-
-<!-- Page 3: Diagnostic -->
-<div class="page-break"></div>
-<div class="page-header">
-  <span class="page-header-logo">BWIX.</span>
-  <span class="page-header-url">bwix.app</span>
-</div>
-
-<h3 style="border-bottom:2px solid #00c896;padding-bottom:4px">Diagnostic financier</h3>
-
-<div class="diagnostic">
-  <p style="font-size:12px;line-height:1.6;color:#333;margin-bottom:12px">{ai.get('synthese', '')}</p>
-
-  <div class="diag-section">
-    <h4 style="color:#00c896">Points forts</h4>
-    {points_forts if points_forts else '<p style="font-size:11px;color:#999">Aucun</p>'}
-  </div>
-
-  <div class="diag-section">
-    <h4 style="color:#f59e0b">Points d'attention</h4>
-    {points_attention if points_attention else '<p style="font-size:11px;color:#999">Aucun</p>'}
-  </div>
-
-  <div class="diag-section">
-    <h4 style="color:#ef4444">Risques</h4>
-    {risques if risques else '<p style="font-size:11px;color:#999">Aucun</p>'}
-  </div>
-
-  <div class="diag-section">
-    <h4 style="color:#3b82f6">Recommandations</h4>
-    {recommandations if recommandations else '<p style="font-size:11px;color:#999">Aucun</p>'}
-  </div>
-
-  {"<div class='diag-section'><h4>Commentaire valorisation</h4><p style='font-size:11px;line-height:1.5'>" + ai['valorisation_commentaire'] + "</p></div>" if ai.get('valorisation_commentaire') else ""}
-</div>
-
-</body>
-</html>"""
-
-    pdf_bytes = HTML(string=html_content).write_pdf()
-    return pdf_bytes
+    # Build PDF
+    doc.build(elements, onFirstPage=_header_footer, onLaterPages=_header_footer)
+    return buf.getvalue()
 
 
 def generate_pdf_base64(data: dict) -> str:
@@ -472,7 +502,6 @@ def generate_pdf_base64(data: dict) -> str:
 def pdf_filename(data: dict) -> str:
     """Generate a clean filename for the PDF."""
     denom = data.get("denomination", "Analyse")
-    # Clean for filename
     clean = "".join(c if c.isalnum() or c in (" ", "-", "_") else "" for c in denom).strip().replace(" ", "_")
     annees = data.get("annees_disponibles", [data.get("annee")])
     annee_str = str(annees[-1]) if annees and annees[-1] else ""
