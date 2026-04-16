@@ -11,9 +11,10 @@ import httpx
 import stripe
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from extract import extract_bnb_pdf, detect_consolidated
+from pdf_report import generate_pdf, generate_pdf_base64, pdf_filename
 from ratios import (compute_ratios, compute_dcf, compute_score, compute_badges,
                      compute_productivite, compute_evolution, compute_ebitda_pondere,
                      SECTEUR_MULTIPLES, SECTEUR_SEUILS, STRUCTURE_PARTICULIERE)
@@ -33,7 +34,7 @@ STRIPE_TEST_MODE = os.environ.get("STRIPE_TEST_MODE", "false").strip().lower() =
 if STRIPE_TEST_MODE:
     STRIPE_SECRET = os.environ.get("STRIPE_SECRET_KEY_TEST", "").strip()
     STRIPE_PRICE_ID = os.environ.get("STRIPE_PRICE_ID_TEST", "").strip()
-    STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "").strip()
+    STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET_TEST", "").strip()
     logging.warning("\u26a0\ufe0f STRIPE TEST MODE ACTIF")
 else:
     STRIPE_SECRET = os.environ["STRIPE_SECRET_KEY"].strip()
@@ -194,23 +195,39 @@ Réponds UNIQUEMENT en JSON valide :
 
 
 # ── Resend email ────────────────────────────────────────────────────────────
-async def send_email(to: str, subject: str, html: str):
+async def send_email(to: str, subject: str, html: str, attachments: list = None):
+    payload = {
+        "from": "BWIX <noreply@bwix.app>",
+        "to": [to],
+        "subject": subject,
+        "html": html,
+    }
+    if attachments:
+        payload["attachments"] = attachments
     async with httpx.AsyncClient() as client:
         await client.post(
             "https://api.resend.com/emails",
             headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
-            json={
-                "from": "BWIX <noreply@bwix.app>",
-                "to": [to],
-                "subject": subject,
-                "html": html,
-            },
+            json=payload,
         )
 
 
 async def send_unlock_email(email: str, token: str):
-    """Send analysis unlock confirmation email. Shared by Stripe webhook and promo codes."""
+    """Send analysis unlock confirmation email with PDF attachment."""
     link = f"{FRONTEND_URL}/resultats?token={token}"
+
+    # Generate PDF attachment
+    attachments = []
+    try:
+        rows = await _supabase_select("analyses", f"token=eq.{token}&select=data_json")
+        if rows:
+            data = rows[0]["data_json"] if isinstance(rows[0]["data_json"], dict) else json.loads(rows[0]["data_json"])
+            pdf_b64 = generate_pdf_base64(data)
+            fname = pdf_filename(data)
+            attachments.append({"filename": fname, "content": pdf_b64})
+    except Exception:
+        logging.warning("PDF generation failed for email attachment (token=%s)", token)
+
     await send_email(
         email,
         "Votre analyse BWIX est pr\u00eate",
@@ -220,11 +237,12 @@ async def send_unlock_email(email: str, token: str):
         <p><a href="{link}" style="display:inline-block;background:#00c896;color:#0b1929;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:600">
         Voir l'analyse compl\u00e8te</a></p>
         <p style="color:#8fa3bf;font-size:14px;margin-top:24px">
-        Ce lien est unique et reste accessible \u00e0 tout moment.</p>
+        Votre rapport est \u00e9galement disponible en pi\u00e8ce jointe (PDF) et en ligne via ce lien permanent.</p>
         <hr style="border:none;border-top:1px solid #e2e8f0;margin:24px 0">
         <p style="color:#8fa3bf;font-size:12px">
         BWIX est un outil d'aide \u00e0 la d\u00e9cision indicatif. Les r\u00e9sultats ne constituent pas un conseil financier ou comptable.</p>
         </div>""",
+        attachments=attachments if attachments else None,
     )
 
 
@@ -621,24 +639,31 @@ async def create_analyse(
             },
         }
 
-    # Return freemium preview
-    vr = ratios.get('valorisation_resume', {})
+    # Return freemium preview — no paid data leaked
     return {
         "token": token,
         "is_consolidated": is_consolidated,
         "score_sante": score_sante,
         "unlocked": False,
-        **multi,
+        "denomination": denomination,
+        "nb_exercices": nb_exercices,
+        "annee": annee_n,
+        "annee_precedente": annee_n1,
+        "annees_disponibles": [annee_n1, annee_n] if has_n1 else [annee_n],
+        "ebitda_n": ebitda_n,
+        "ebitda_n1": ebitda_n1,
+        "exercices_count": nb_exercices,
         "freemium": {
             "ebitda": ratios['rentabilite']['ebitda'],
             "roe": ratios['rentabilite']['roe'],
             "liquidite_generale": ratios['liquidite']['liquidite_generale'],
             "solvabilite": ratios['structure']['solvabilite'],
         },
-        "valorisation_floue": {
-            "fourchette_low": vr.get('fourchette_equity_low'),
-            "fourchette_high": vr.get('fourchette_equity_high'),
-        },
+        "valorisation_floue": None,
+        "valorisation": None,
+        "badges": {k: v for k, v in badges.items() if k in ('roe', 'liquidite', 'solvabilite', 'gearing')} if badges else None,
+        "productivite": None,
+        "score_deductions": None,
     }
 
 
@@ -662,6 +687,8 @@ async def get_analyse(token: str):
         stored_badges = compute_badges(ratios, data.get('secteur', ''))
 
     valo = data.get('valorisation', {})
+
+    # ── Freemium preview (always visible) ──────────────────────────────
     result = {
         "token": token,
         "denomination": data.get('denomination', ''),
@@ -669,16 +696,6 @@ async def get_analyse(token: str):
         "annee_precedente": data.get('annee_precedente'),
         "annees_disponibles": data.get('annees_disponibles', [data.get('annee')]),
         "nb_exercices": data.get('nb_exercices', 1),
-        "ebitda_n": data.get('ebitda_n'),
-        "ebitda_n1": data.get('ebitda_n1'),
-        "ebitda_reference": data.get('ebitda_reference'),
-        "ebitda_reference_label": data.get('ebitda_reference_label'),
-        "ebitda_variation": data.get('ebitda_variation'),
-        "valorisation": valo,
-        "score_deductions": data.get('score_deductions', []),
-        "badges": stored_badges,
-        "productivite": data.get('productivite'),
-        "exercices_count": data.get('nb_exercices', 1),
         "is_consolidated": data.get('is_consolidated', False),
         "is_structure_particuliere": data.get('is_structure_particuliere', False),
         "score_sante": data.get('score_sante') or ai.get('score_sante', 50),
@@ -689,13 +706,24 @@ async def get_analyse(token: str):
             "liquidite_generale": ratios.get('liquidite', {}).get('liquidite_generale'),
             "solvabilite": ratios.get('structure', {}).get('solvabilite'),
         },
-        "valorisation_floue": {
-            "fourchette_low": valo.get('fourchette_basse') or vr.get('fourchette_equity_low'),
-            "fourchette_high": valo.get('fourchette_haute') or vr.get('fourchette_equity_high'),
-        },
     }
 
     if unlocked:
+        # ── Full data (paid only) ──────────────────────────────────────
+        result["ebitda_n"] = data.get('ebitda_n')
+        result["ebitda_n1"] = data.get('ebitda_n1')
+        result["ebitda_reference"] = data.get('ebitda_reference')
+        result["ebitda_reference_label"] = data.get('ebitda_reference_label')
+        result["ebitda_variation"] = data.get('ebitda_variation')
+        result["valorisation"] = valo
+        result["valorisation_floue"] = {
+            "fourchette_low": valo.get('fourchette_basse') or vr.get('fourchette_equity_low'),
+            "fourchette_high": valo.get('fourchette_haute') or vr.get('fourchette_equity_high'),
+        }
+        result["score_deductions"] = data.get('score_deductions', [])
+        result["badges"] = stored_badges
+        result["productivite"] = data.get('productivite')
+        result["exercices_count"] = data.get('nb_exercices', 1)
         result["full"] = {
             "comptes": data.get('comptes'),
             "ratios": ratios,
@@ -707,8 +735,41 @@ async def get_analyse(token: str):
             "evolution": data.get('evolution', {}),
             "synthese": data.get('synthese', {}),
         }
+    else:
+        # ── Locked: only teaser data, no detail ────────────────────────
+        result["ebitda_n"] = data.get('ebitda_n')
+        result["ebitda_n1"] = data.get('ebitda_n1')
+        result["valorisation_floue"] = None
+        result["valorisation"] = None
+        result["score_deductions"] = None
+        # Only expose badges for the 4 freemium ratios
+        freemium_badge_keys = {'roe', 'liquidite', 'solvabilite', 'gearing'}
+        result["badges"] = {k: v for k, v in stored_badges.items() if k in freemium_badge_keys} if stored_badges else None
+        result["productivite"] = None
+        result["exercices_count"] = data.get('nb_exercices', 1)
 
     return result
+
+
+@app.get("/api/analyse/{token}/export-pdf")
+async def export_pdf(token: str):
+    """Generate and return a PDF report for an unlocked analysis."""
+    rows = await _supabase_select("analyses", f"token=eq.{token}&select=*")
+    if not rows:
+        raise HTTPException(404, "Analyse introuvable.")
+    row = rows[0]
+    if not row.get("unlocked"):
+        raise HTTPException(403, "Analyse non d\u00e9bloqu\u00e9e.")
+
+    data = row["data_json"] if isinstance(row["data_json"], dict) else json.loads(row["data_json"])
+    pdf_bytes = generate_pdf(data)
+    filename = pdf_filename(data)
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ── Add exercice ────────────────────────────────────────────────────────────
@@ -894,10 +955,21 @@ async def stripe_webhook(request: Request):
     payload = await request.body()
     sig = request.headers.get("stripe-signature")
 
+    # Debug webhook signature mismatch (logging.warning flushes immediately)
+    logging.warning("=== STRIPE WEBHOOK DEBUG ===")
+    logging.warning("WEBHOOK_SECRET_TEST env = %s...", os.environ.get('STRIPE_WEBHOOK_SECRET_TEST', 'NON TROUVÉ')[:25])
+    logging.warning("WEBHOOK_SECRET utilisé  = %s...", STRIPE_WEBHOOK_SECRET[:25])
+    logging.warning("Stripe-Signature header = %s", (sig or 'ABSENT')[:80])
+    logging.warning("Payload size = %d bytes", len(payload))
+
     try:
         event = stripe.Webhook.construct_event(payload, sig, STRIPE_WEBHOOK_SECRET)
-    except (ValueError, stripe.error.SignatureVerificationError):
-        raise HTTPException(400, "Invalid signature.")
+    except ValueError as e:
+        logging.error("Webhook ValueError: %s", e)
+        raise HTTPException(400, f"Invalid payload: {e}")
+    except stripe.error.SignatureVerificationError as e:
+        logging.error("Webhook SignatureVerificationError: %s", e)
+        raise HTTPException(400, f"Invalid signature: {e}")
 
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
