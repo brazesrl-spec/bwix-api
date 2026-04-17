@@ -413,100 +413,251 @@ def compute_ratios(data: dict, secteur: str = None, params: dict = None) -> dict
     return ratios
 
 
+# ── Linear scoring system ──────────────────────────────────────────────────
+#
+# Each ratio is scored 0-10 via piecewise linear interpolation:
+#   value <= borne_min  → 0/10
+#   borne_min < value < seuil   → linear 0 → 7
+#   seuil <= value < borne_max  → linear 7 → 10
+#   value >= borne_max → 10/10
+#
+# For "lower is better" ratios (gearing, dette_ebitda): the scale is inverted.
+# Each ratio has a weight; the final score is weighted sum → 0-100.
+
+SECTEUR_BORNES = {
+    'Construction / BTP': {
+        # higher is better
+        'solvabilite':  {'min': 0.10, 'seuil': 0.25, 'max': 0.40, 'poids': 15},
+        'liquidite':    {'min': 0.60, 'seuil': 1.10, 'max': 1.80, 'poids': 12},
+        'roe':          {'min': 0.00, 'seuil': 0.08, 'max': 0.20, 'poids': 12},
+        'marge_ebitda': {'min': 0.00, 'seuil': 0.08, 'max': 0.15, 'poids': 10},
+        'couverture':   {'min': 0.00, 'seuil': 2.00, 'max': 5.00, 'poids': 8},
+        # lower is better (inverted)
+        'gearing':      {'min': 0.30, 'seuil': 1.00, 'max': 2.00, 'poids': 10, 'inv': True},
+        'dette_ebitda': {'min': 1.00, 'seuil': 3.00, 'max': 5.00, 'poids': 10, 'inv': True},
+        # binary
+        'ebitda_positif': {'poids': 15},
+        'resultat_net':   {'poids': 8},
+    },
+    'Services': {
+        'solvabilite':  {'min': 0.15, 'seuil': 0.30, 'max': 0.50, 'poids': 15},
+        'liquidite':    {'min': 0.70, 'seuil': 1.20, 'max': 2.00, 'poids': 12},
+        'roe':          {'min': 0.00, 'seuil': 0.10, 'max': 0.25, 'poids': 12},
+        'marge_ebitda': {'min': 0.00, 'seuil': 0.10, 'max': 0.25, 'poids': 10},
+        'couverture':   {'min': 0.00, 'seuil': 3.00, 'max': 6.00, 'poids': 8},
+        'gearing':      {'min': 0.20, 'seuil': 0.70, 'max': 1.50, 'poids': 10, 'inv': True},
+        'dette_ebitda': {'min': 0.50, 'seuil': 2.00, 'max': 4.00, 'poids': 10, 'inv': True},
+        'ebitda_positif': {'poids': 15},
+        'resultat_net':   {'poids': 8},
+    },
+    'Commerce': {
+        'solvabilite':  {'min': 0.08, 'seuil': 0.20, 'max': 0.35, 'poids': 15},
+        'liquidite':    {'min': 0.50, 'seuil': 0.80, 'max': 1.60, 'poids': 12},
+        'roe':          {'min': 0.00, 'seuil': 0.06, 'max': 0.18, 'poids': 12},
+        'marge_ebitda': {'min': 0.00, 'seuil': 0.05, 'max': 0.12, 'poids': 10},
+        'couverture':   {'min': 0.00, 'seuil': 2.00, 'max': 4.00, 'poids': 8},
+        'gearing':      {'min': 0.50, 'seuil': 1.00, 'max': 2.50, 'poids': 10, 'inv': True},
+        'dette_ebitda': {'min': 1.00, 'seuil': 3.00, 'max': 5.00, 'poids': 10, 'inv': True},
+        'ebitda_positif': {'poids': 15},
+        'resultat_net':   {'poids': 8},
+    },
+    'Industrie': {
+        'solvabilite':  {'min': 0.12, 'seuil': 0.25, 'max': 0.45, 'poids': 15},
+        'liquidite':    {'min': 0.60, 'seuil': 1.00, 'max': 2.00, 'poids': 12},
+        'roe':          {'min': 0.00, 'seuil': 0.05, 'max': 0.20, 'poids': 12},
+        'marge_ebitda': {'min': 0.00, 'seuil': 0.10, 'max': 0.20, 'poids': 10},
+        'couverture':   {'min': 0.00, 'seuil': 2.00, 'max': 5.00, 'poids': 8},
+        'gearing':      {'min': 0.30, 'seuil': 1.00, 'max': 2.00, 'poids': 10, 'inv': True},
+        'dette_ebitda': {'min': 1.00, 'seuil': 3.00, 'max': 5.00, 'poids': 10, 'inv': True},
+        'ebitda_positif': {'poids': 15},
+        'resultat_net':   {'poids': 8},
+    },
+    'Tech / SaaS': {
+        'solvabilite':  {'min': 0.15, 'seuil': 0.35, 'max': 0.60, 'poids': 15},
+        'liquidite':    {'min': 0.80, 'seuil': 1.50, 'max': 3.00, 'poids': 12},
+        'roe':          {'min': 0.00, 'seuil': 0.10, 'max': 0.30, 'poids': 12},
+        'marge_ebitda': {'min': 0.00, 'seuil': 0.15, 'max': 0.40, 'poids': 10},
+        'couverture':   {'min': 0.00, 'seuil': 4.00, 'max': 8.00, 'poids': 8},
+        'gearing':      {'min': 0.00, 'seuil': 0.50, 'max': 1.00, 'poids': 10, 'inv': True},
+        'dette_ebitda': {'min': 0.50, 'seuil': 1.50, 'max': 3.00, 'poids': 10, 'inv': True},
+        'ebitda_positif': {'poids': 15},
+        'resultat_net':   {'poids': 8},
+    },
+    'Management / Holding': {
+        'solvabilite':  {'min': 0.05, 'seuil': 0.15, 'max': 0.40, 'poids': 18},
+        'liquidite':    {'min': 0.30, 'seuil': 0.50, 'max': 2.00, 'poids': 10},
+        'roe':          {'min': 0.00, 'seuil': 0.02, 'max': 0.10, 'poids': 8},
+        'marge_ebitda': {'min': 0.00, 'seuil': 0.00, 'max': 1.00, 'poids': 4},
+        'couverture':   {'min': 0.00, 'seuil': 1.00, 'max': 3.00, 'poids': 8},
+        'gearing':      {'min': 0.50, 'seuil': 2.00, 'max': 4.00, 'poids': 10, 'inv': True},
+        'dette_ebitda': {'min': 1.00, 'seuil': 4.00, 'max': 8.00, 'poids': 10, 'inv': True},
+        'ebitda_positif': {'poids': 20},
+        'resultat_net':   {'poids': 12},
+    },
+    'Immobilier / SCI': {
+        'solvabilite':  {'min': 0.05, 'seuil': 0.15, 'max': 0.35, 'poids': 18},
+        'liquidite':    {'min': 0.30, 'seuil': 0.50, 'max': 1.50, 'poids': 10},
+        'roe':          {'min': 0.00, 'seuil': 0.03, 'max': 0.10, 'poids': 8},
+        'marge_ebitda': {'min': 0.00, 'seuil': 0.20, 'max': 0.50, 'poids': 6},
+        'couverture':   {'min': 0.00, 'seuil': 1.00, 'max': 2.00, 'poids': 8},
+        'gearing':      {'min': 1.00, 'seuil': 3.00, 'max': 5.00, 'poids': 10, 'inv': True},
+        'dette_ebitda': {'min': 2.00, 'seuil': 6.00, 'max': 10.00, 'poids': 8, 'inv': True},
+        'ebitda_positif': {'poids': 20},
+        'resultat_net':   {'poids': 12},
+    },
+}
+
+# Fallback bornes for sectors not explicitly listed (ASBL, Startup, unknown)
+_BORNES_DEFAULT = {
+    'solvabilite':  {'min': 0.10, 'seuil': 0.25, 'max': 0.45, 'poids': 15},
+    'liquidite':    {'min': 0.50, 'seuil': 1.00, 'max': 2.00, 'poids': 12},
+    'roe':          {'min': 0.00, 'seuil': 0.05, 'max': 0.20, 'poids': 12},
+    'marge_ebitda': {'min': 0.00, 'seuil': 0.08, 'max': 0.20, 'poids': 10},
+    'couverture':   {'min': 0.00, 'seuil': 2.00, 'max': 5.00, 'poids': 8},
+    'gearing':      {'min': 0.30, 'seuil': 1.00, 'max': 2.00, 'poids': 10, 'inv': True},
+    'dette_ebitda': {'min': 1.00, 'seuil': 3.00, 'max': 5.00, 'poids': 10, 'inv': True},
+    'ebitda_positif': {'poids': 15},
+    'resultat_net':   {'poids': 8},
+}
+
+
+def _score_linear(value, borne_min, seuil, borne_max):
+    """Piecewise linear interpolation → 0.0 to 10.0.
+
+    value <= borne_min → 0
+    borne_min < value < seuil  → linear 0 → 7
+    seuil <= value < borne_max → linear 7 → 10
+    value >= borne_max → 10
+    """
+    if value is None:
+        return None
+    if value <= borne_min:
+        return 0.0
+    if value < seuil:
+        return 7.0 * (value - borne_min) / (seuil - borne_min) if seuil > borne_min else 7.0
+    if value < borne_max:
+        return 7.0 + 3.0 * (value - seuil) / (borne_max - seuil) if borne_max > seuil else 10.0
+    return 10.0
+
+
+def _score_linear_inv(value, borne_min, seuil, borne_max):
+    """Inverted linear for "lower is better" ratios.
+
+    value <= borne_min → 10
+    borne_min < value < seuil  → linear 10 → 7
+    seuil <= value < borne_max → linear 7 → 0
+    value >= borne_max → 0
+    """
+    if value is None:
+        return None
+    if value <= borne_min:
+        return 10.0
+    if value < seuil:
+        return 10.0 - 3.0 * (value - borne_min) / (seuil - borne_min) if seuil > borne_min else 7.0
+    if value < borne_max:
+        return 7.0 - 7.0 * (value - seuil) / (borne_max - seuil) if borne_max > seuil else 0.0
+    return 0.0
+
+
 def compute_score(ratios: dict, secteur: str = '', comptes_data: dict = None,
                    nb_exercices: int = 1, ebitda_variation: float = None) -> dict:
-    """Deterministic health score 0-100 with deduction breakdown.
+    """Deterministic linear health score 0-100.
 
-    Returns {'score': int, 'score_deductions': [{'motif': str, 'points': int}]}
+    Each ratio is scored 0-10 via piecewise linear interpolation against
+    sector-specific bounds, then weighted to produce a 0-100 composite.
+
+    Returns {'score': int, 'score_deductions': [{'motif': str, 'points': float}]}
     """
-    if comptes_data is None:
-        comptes_data = {}
-    is_special = secteur in STRUCTURE_PARTICULIERE
-    score = 50  # baseline
-    deductions = []
-    ind = ratios.get('indicators', {})
+    bornes = SECTEUR_BORNES.get(secteur, _BORNES_DEFAULT)
 
-    # +/- points based on indicator status
-    weights = {
-        'solvabilite': 15,
-        'liquidite_generale': 8 if is_special else 12,
-        'roe': 6 if is_special else 12,
-        'marge_ebitda': 6 if is_special else 12,
-        'marge_nette': 4 if is_special else 8,
-        'gearing': 4 if is_special else 8,
+    rent = ratios.get('rentabilite', {})
+    struct = ratios.get('structure', {})
+    liq = ratios.get('liquidite', {})
+
+    # Map ratio keys → extracted values
+    ratio_values = {
+        'solvabilite':  struct.get('solvabilite'),
+        'liquidite':    liq.get('liquidite_generale'),
+        'roe':          rent.get('roe'),
+        'marge_ebitda': rent.get('marge_ebitda'),
+        'couverture':   struct.get('couverture_interets'),
+        'gearing':      struct.get('gearing'),
+        'dette_ebitda': struct.get('dettes_ebitda'),
     }
-    for key, w in weights.items():
-        status = (ind.get(key) or {}).get('status', 'neutral')
-        if status == 'bon':
-            score += w
-        elif status == 'alerte':
-            score -= (w // 2) if is_special else w
 
-    # Positive EBITDA bonus
-    ebitda = ratios.get('rentabilite', {}).get('ebitda', 0) or 0
+    total_points = 0.0
+    total_weight = 0.0
+    details = []
+
+    # Score each continuous ratio
+    for key, value in ratio_values.items():
+        b = bornes.get(key)
+        if not b or 'min' not in b:
+            continue
+        poids = b['poids']
+        if value is None:
+            # Unknown value → neutral (5/10)
+            pts = 5.0
+            details.append({'motif': f'{key} : N/A (neutre)', 'points': round(pts, 1)})
+        elif b.get('inv'):
+            pts = _score_linear_inv(value, b['min'], b['seuil'], b['max'])
+            details.append({'motif': f'{key} : {_fmt_ratio(key, value)} → {pts:.1f}/10', 'points': round(pts, 1)})
+        else:
+            pts = _score_linear(value, b['min'], b['seuil'], b['max'])
+            details.append({'motif': f'{key} : {_fmt_ratio(key, value)} → {pts:.1f}/10', 'points': round(pts, 1)})
+        total_points += pts * poids
+        total_weight += poids
+
+    # Binary: EBITDA positif
+    ebitda = rent.get('ebitda', 0) or 0
+    b_ebitda = bornes.get('ebitda_positif', {})
+    poids_ebitda = b_ebitda.get('poids', 15)
     if ebitda > 0:
-        score += 5
-    elif ebitda < 0:
-        score -= 5 if is_special else 10
+        pts = 10.0
+    elif ebitda == 0:
+        pts = 5.0
+    else:
+        pts = 0.0
+    details.append({'motif': f'ebitda_positif : {ebitda:,.0f}€ → {pts:.0f}/10', 'points': round(pts, 1)})
+    total_points += pts * poids_ebitda
+    total_weight += poids_ebitda
 
-    # Positive net result bonus
-    roe = ratios.get('rentabilite', {}).get('roe')
-    roe_threshold = 0.03 if is_special else 0.05
-    if roe is not None and roe > roe_threshold:
-        score += 5
+    # Binary: résultat net positif
+    roe = rent.get('roe')
+    b_rn = bornes.get('resultat_net', {})
+    poids_rn = b_rn.get('poids', 8)
+    if roe is not None and roe > 0:
+        pts = 10.0
+    elif roe is not None and roe == 0:
+        pts = 5.0
+    else:
+        pts = 0.0
+    details.append({'motif': f'resultat_net : ROE {_fmt_ratio("roe", roe)} → {pts:.0f}/10', 'points': round(pts, 1)})
+    total_points += pts * poids_rn
+    total_weight += poids_rn
 
-    # Debt coverage
-    dettes_ebitda = ratios.get('structure', {}).get('dettes_ebitda')
-    if dettes_ebitda is not None:
-        if dettes_ebitda < 2:
-            score += 5
-        elif dettes_ebitda > 5:
-            score -= 3 if is_special else 5
+    # Weighted average → 0-100
+    if total_weight > 0:
+        score = round((total_points / total_weight) * 10)  # (pts/10) / weight * 100
+    else:
+        score = 50
 
-    # ── Risk deductions (applied after base score) ──────────────────────
-    ca = comptes_data.get('chiffre_affaires', 0) or 0
-    stocks = comptes_data.get('stocks', 0) or 0
-    total_passif = comptes_data.get('total_passif', 0) or 0
-    autres_dettes = comptes_data.get('autres_dettes', 0) or 0
-    charges_fin = abs(comptes_data.get('charges_financieres', 0) or 0)
-    dette_bancaire_lt = comptes_data.get('dette_bancaire_lt', 0) or 0
-    dette_bancaire_ct = comptes_data.get('dette_bancaire_ct', 0) or 0
-    bfr = ratios.get('liquidite', {}).get('bfr', 0) or 0
-
-    # BFR vs CA (non-cumulative: highest applies)
-    if ca > 0:
-        bfr_ratio = bfr / ca
-        if bfr_ratio > 1.5:
-            deductions.append({'motif': 'BFR > 1.5x CA', 'points': -8})
-            score -= 8
-        elif bfr_ratio > 1.0:
-            deductions.append({'motif': 'BFR > 1.0x CA', 'points': -5})
-            score -= 5
-
-    # Stocks vs CA
-    if ca > 0 and stocks > ca:
-        deductions.append({'motif': 'Stocks > 1.0x CA', 'points': -5})
-        score -= 5
-
-    # Autres dettes vs total passif
-    if total_passif > 0 and autres_dettes / total_passif > 0.15:
-        deductions.append({'motif': 'Autres dettes > 15% du passif', 'points': -4})
-        score -= 4
-
-    # Charges financières without identified bank debt
-    if charges_fin > 0 and dette_bancaire_lt == 0 and dette_bancaire_ct == 0:
-        deductions.append({'motif': 'Charges financi\u00e8res sans dette bancaire identifi\u00e9e', 'points': -3})
-        score -= 3
-
-    # EBITDA variation > 30%
-    if ebitda_variation is not None and ebitda_variation > 0.30:
-        deductions.append({'motif': 'Variation EBITDA N/N-1 > 30%', 'points': -4})
-        score -= 4
-
-    # Clamp to [0, 95]
     score = max(0, min(95, score))
 
-    return {'score': score, 'score_deductions': deductions}
+    return {'score': score, 'score_deductions': details}
+
+
+def _fmt_ratio(key, value):
+    """Format a ratio value for the deduction detail string."""
+    if value is None:
+        return 'N/A'
+    if key in ('solvabilite', 'roe', 'marge_ebitda'):
+        return f'{value * 100:.1f}%'
+    if key in ('liquidite', 'gearing'):
+        return f'{value:.2f}'
+    if key in ('dette_ebitda', 'couverture'):
+        return f'{value:.1f}x'
+    return f'{value}'
 
 
 POIDS_EBITDA = {
