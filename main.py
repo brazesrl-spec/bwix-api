@@ -725,10 +725,8 @@ async def get_analyse(token: str):
     ai = data.get('ai_analysis', {})
     vr = ratios.get('valorisation_resume', {})
 
-    # Compute badges on the fly (handles old analyses without stored badges)
-    stored_badges = ratios.get('badges', {})
-    if not stored_badges:
-        stored_badges = compute_badges(ratios, data.get('secteur', ''))
+    # Always recompute badges (ensures new badge types are included for old analyses)
+    stored_badges = compute_badges(ratios, data.get('secteur', ''))
 
     valo = data.get('valorisation', {})
 

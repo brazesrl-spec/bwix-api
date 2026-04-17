@@ -536,17 +536,11 @@ def generate_pdf(data: dict) -> bytes:
         Paragraph(f'<font color="{sc_hex}"><b>{sc_label}</b></font>', st["Body"]),
     ]
     score_right = []
-    deductions = data.get("score_deductions", [])
-    if deductions:
-        score_right.append(Paragraph("<b>Ajustements du score :</b>", st["Small"]))
-        for d in deductions[:5]:
-            score_right.append(Paragraph(
-                f'<font color="#ef4444">{d["points"]:+.0f} pts</font>  {d["motif"]}', st["Small"]))
-    else:
-        score_right.append(Paragraph("<b>Score sante</b>", st["Body"]))
-        score_right.append(Paragraph(
-            "Score composite base sur la rentabilite, la structure financiere, "
-            "la liquidite et les risques detectes.", st["Small"]))
+    score_right.append(Paragraph("<b>Score sante</b>", st["Body"]))
+    score_right.append(Paragraph(
+        "Score composite base sur la rentabilite, la structure financiere, "
+        "la liquidite et les risques detectes. Calcule par interpolation lineaire "
+        "sur les seuils sectoriels.", st["Small"]))
 
     score_t = Table([[score_left, score_right]], colWidths=[CONTENT_W * 0.35, CONTENT_W * 0.65])
     score_t.setStyle(TableStyle([
