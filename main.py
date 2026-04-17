@@ -544,6 +544,7 @@ async def create_analyse(
     valorisation_unified['ev_ebitda'] = synthese_ev
     valorisation_unified['fourchette_basse'] = synthese_fourchette_low
     valorisation_unified['fourchette_haute'] = synthese_fourchette_high
+    valorisation_unified['fourchette_methode'] = f"EBITDA pond\u00e9r\u00e9 \u00d7 multiples sectoriels ({mult_low}x \u2014 {mult_high}x)"
     valorisation_unified['ebitda_pondere_detail'] = ebitda_pond['poids_detail']
 
     # Sync valorisation_resume with synthese values (used by frontend)
