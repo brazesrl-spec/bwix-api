@@ -944,7 +944,7 @@ async def create_checkout(request: Request):
         mode="payment",
         success_url=f"{FRONTEND_URL}/resultats?token={token}",
         cancel_url=f"{FRONTEND_URL}/resultats?token={token}",
-        customer_email=rows[0]["email"],
+        customer_email=rows[0]["email"] if rows[0]["email"] != "analyse@bwix.app" else None,
         metadata={"analyse_token": token},
     )
     return {"checkout_url": session.url}
@@ -984,16 +984,16 @@ async def stripe_webhook(request: Request):
 
             update_data = {"unlocked": True, "stripe_session_id": session["id"]}
 
-            # Store email if analysis has none yet (free_slots=0 flow)
+            # Store email if analysis has no real email yet
             rows = await _supabase_select("analyses", f"token=eq.{token}&select=email")
             existing_email = (rows[0].get("email") or "").strip() if rows else ""
-            if not existing_email and stripe_email:
+            if stripe_email and (not existing_email or existing_email == "analyse@bwix.app"):
                 update_data["email"] = stripe_email
 
             await _supabase_update("analyses", f"token=eq.{token}", update_data)
 
-            # Send unlock email to whichever email we have
-            email = existing_email or stripe_email
+            # Send unlock email to real email (prefer Stripe over placeholder)
+            email = stripe_email or (existing_email if existing_email != "analyse@bwix.app" else "")
             if email:
                 await send_unlock_email(email, token)
 
