@@ -376,7 +376,16 @@ def compute_ratios(data: dict, secteur: str = None, params: dict = None) -> dict
 
     liquidite_generale = _safe_div(actif_circulant, dettes_ct)
     liquidite_reduite = _safe_div(creances + tresorerie, dettes_ct)
-    bfr = stocks + creances - dettes_ct
+
+    # BFR d'exploitation = stocks + créances commerciales - dettes fournisseurs
+    creances_commerciales = data.get('creances_commerciales', 0) or 0
+    fournisseurs = data.get('fournisseurs', 0) or 0
+    # Fallback: if sub-accounts not available, use totals (less precise)
+    if not creances_commerciales and creances:
+        creances_commerciales = creances
+    if not fournisseurs and data.get('dettes_commerciales'):
+        fournisseurs = data.get('dettes_commerciales', 0) or 0
+    bfr = stocks + creances_commerciales - fournisseurs
     bfr_jours_ca = _safe_div(bfr * 365, ca) if ca else None
 
     secteur_key = secteur or ''
