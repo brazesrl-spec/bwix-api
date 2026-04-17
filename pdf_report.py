@@ -535,7 +535,7 @@ def generate_pdf(data: dict) -> bytes:
     score_left = [
         Paragraph(f'<font size="28" color="{sc_hex}"><b>{score}</b></font>'
                   f'<font size="10" color="#999"> /100</font>', st["Body"]),
-        Spacer(1, 8),
+        Spacer(1, 16),
         Paragraph(f'<font size="8" color="{sc_hex}"><b>{sc_label}</b></font>', st["Body"]),
     ]
     score_right = []
