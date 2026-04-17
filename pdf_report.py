@@ -541,7 +541,7 @@ def generate_pdf(data: dict) -> bytes:
         score_right.append(Paragraph("<b>Ajustements du score :</b>", st["Small"]))
         for d in deductions[:5]:
             score_right.append(Paragraph(
-                f'<font color="#ef4444">{d["points"]:+d} pts</font>  {d["motif"]}', st["Small"]))
+                f'<font color="#ef4444">{d["points"]:+.0f} pts</font>  {d["motif"]}', st["Small"]))
     else:
         score_right.append(Paragraph("<b>Score sante</b>", st["Body"]))
         score_right.append(Paragraph(
