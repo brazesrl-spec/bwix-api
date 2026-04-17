@@ -975,11 +975,27 @@ async def stripe_webhook(request: Request):
         session = event["data"]["object"]
         token = session.get("metadata", {}).get("analyse_token")
         if token:
-            await _supabase_update("analyses", f"token=eq.{token}", {"unlocked": True, "stripe_session_id": session["id"]})
+            # Get email from Stripe checkout (customer_details.email or customer_email)
+            stripe_email = (
+                (session.get("customer_details") or {}).get("email")
+                or session.get("customer_email")
+                or ""
+            ).strip().lower()
 
+            update_data = {"unlocked": True, "stripe_session_id": session["id"]}
+
+            # Store email if analysis has none yet (free_slots=0 flow)
             rows = await _supabase_select("analyses", f"token=eq.{token}&select=email")
-            if rows:
-                await send_unlock_email(rows[0]["email"], token)
+            existing_email = (rows[0].get("email") or "").strip() if rows else ""
+            if not existing_email and stripe_email:
+                update_data["email"] = stripe_email
+
+            await _supabase_update("analyses", f"token=eq.{token}", update_data)
+
+            # Send unlock email to whichever email we have
+            email = existing_email or stripe_email
+            if email:
+                await send_unlock_email(email, token)
 
     return {"received": True}
 
