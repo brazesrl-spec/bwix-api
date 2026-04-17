@@ -546,6 +546,14 @@ async def create_analyse(
     valorisation_unified['fourchette_haute'] = synthese_fourchette_high
     valorisation_unified['ebitda_pondere_detail'] = ebitda_pond['poids_detail']
 
+    # Sync valorisation_resume with synthese values (used by frontend)
+    ratios['valorisation_resume']['ebitda'] = synthese_ebitda
+    ratios['valorisation_resume']['ebitda_reference'] = synthese_ebitda
+    ratios['valorisation_resume']['ebitda_reference_label'] = valorisation_unified['ebitda_reference_label']
+    ratios['valorisation_resume']['ev_ebitda'] = synthese_ev
+    ratios['valorisation_resume']['fourchette_equity_low'] = synthese_fourchette_low
+    ratios['valorisation_resume']['fourchette_equity_high'] = synthese_fourchette_high
+
     # Claude AI analysis (CORRECTION 3: strict prompt)
     try:
         ai_analysis = run_claude_analysis(ratios, data_n, secteur, valorisation_unified)
