@@ -72,14 +72,22 @@ EMPTY_DATA = {
 
 
 def _parse_amount(text):
-    """Parse a BNB/BOB formatted amount (dots as thousands, optional negative)."""
+    """Parse BNB/BOB amounts. Handles:
+    - BNB: "520.980" (dots = thousands) → 520980
+    - BOB: "2.698.418,25" (dots = thousands, comma = decimals) → 2698418
+    - Plain: "274391" → 274391
+    """
     if not text:
         return None
     text = text.strip().replace('\u202f', '').replace('\xa0', '')
     negative = text.startswith('-')
     if negative:
         text = text[1:]
-    text = text.replace('.', '').replace(',', '')
+    # Strip decimal part (,XX) — bilans are in whole euros
+    if ',' in text:
+        text = text.split(',')[0]
+    # Remove thousands separators (dots)
+    text = text.replace('.', '')
     if not text:
         return None
     try:
@@ -87,6 +95,10 @@ def _parse_amount(text):
         return -val if negative else val
     except ValueError:
         return None
+
+
+# Regex for amounts: European format (1.234.567,89) or plain integers
+_AMOUNT_RE = r'-?(?:\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+(?:,\d{1,2})?)'
 
 
 def _postprocess(data):
@@ -205,7 +217,7 @@ def extract_bnb_pdf(pdf_path: str) -> dict:
 
                     key = CODE_MAP[code]
                     after_code = line[m.end():].strip()
-                    amounts = re.findall(r'-?(?:\d{1,3}(?:\.\d{3})+|\b\d+\b)', after_code)
+                    amounts = re.findall(_AMOUNT_RE, after_code)
 
                     if not amounts:
                         break
@@ -302,7 +314,7 @@ def extract_bob_pdf(pdf_path: str) -> dict:
             after_code = line[m.end():].strip()
 
             # Extract all amounts on the line
-            amounts = re.findall(r'-?(?:\d{1,3}(?:\.\d{3})+|\b\d+\b)', after_code)
+            amounts = re.findall(_AMOUNT_RE, after_code)
             if not amounts:
                 break
 
