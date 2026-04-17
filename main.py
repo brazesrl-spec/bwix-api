@@ -608,7 +608,6 @@ async def create_analyse(
         "ebitda_reference": ebitda_reference,
         "ebitda_reference_label": ebitda_reference_label,
         "ebitda_variation": ebitda_variation,
-        "score_deductions": score_deductions,
         "valorisation": valorisation_unified,
         "badges": badges,
         "productivite": productivite,
@@ -669,7 +668,6 @@ async def create_analyse(
         "valorisation": None,
         "badges": {k: v for k, v in badges.items() if k in ('roe', 'liquidite', 'solvabilite', 'gearing')} if badges else None,
         "productivite": None,
-        "score_deductions": None,
     }
 
 
@@ -726,7 +724,6 @@ async def get_analyse(token: str):
             "fourchette_low": valo.get('fourchette_basse') or vr.get('fourchette_equity_low'),
             "fourchette_high": valo.get('fourchette_haute') or vr.get('fourchette_equity_high'),
         }
-        result["score_deductions"] = data.get('score_deductions', [])
         result["badges"] = stored_badges
         result["productivite"] = data.get('productivite')
         result["exercices_count"] = data.get('nb_exercices', 1)
@@ -747,7 +744,6 @@ async def get_analyse(token: str):
         result["ebitda_n1"] = data.get('ebitda_n1')
         result["valorisation_floue"] = None
         result["valorisation"] = None
-        result["score_deductions"] = None
         # Only expose badges for the 4 freemium ratios
         freemium_badge_keys = {'roe', 'liquidite', 'solvabilite', 'gearing'}
         result["badges"] = {k: v for k, v in stored_badges.items() if k in freemium_badge_keys} if stored_badges else None
