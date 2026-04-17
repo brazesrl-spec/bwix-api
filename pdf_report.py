@@ -1,8 +1,7 @@
-"""BWIX — PDF report generation via ReportLab."""
+"""BWIX — PDF report generation via ReportLab (v2 redesign)."""
 
 import base64
 import io
-import math
 from datetime import datetime
 
 from reportlab.lib import colors
@@ -11,32 +10,49 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.platypus import (
     SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, KeepTogether,
-    PageBreak,
+    PageBreak, HRFlowable,
 )
 from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
+from reportlab.graphics.shapes import Drawing, Circle, Wedge, String, Line, Rect
+from reportlab.graphics.widgets.markers import makeMarker
+from reportlab.graphics import renderPDF
 
 
 # ── Colors ─────────────────────────────────────────────────────────────────
-BWIX_GREEN = colors.Color(0 / 255, 200 / 255, 150 / 255)
-BWIX_GREEN_LIGHT = colors.Color(232 / 255, 250 / 255, 244 / 255)
-YELLOW = colors.Color(245 / 255, 158 / 255, 11 / 255)
-RED = colors.Color(239 / 255, 68 / 255, 68 / 255)
-BLUE = colors.Color(59 / 255, 130 / 255, 246 / 255)
-GRAY = colors.Color(0.4, 0.4, 0.4)
-LIGHT_GRAY = colors.Color(0.95, 0.95, 0.95)
-DARK = colors.Color(0.1, 0.1, 0.1)
+BWIX = colors.HexColor("#00c896")
+BWIX_LIGHT = colors.HexColor("#e8faf4")
+BWIX_DARK = colors.HexColor("#00a87d")
+YELLOW_BADGE = colors.HexColor("#f59e0b")
+YELLOW_BG = colors.HexColor("#fef9e7")
+RED_BADGE = colors.HexColor("#ef4444")
+RED_BG = colors.HexColor("#fdecec")
+BLUE = colors.HexColor("#3b82f6")
+BLUE_BG = colors.HexColor("#eff6ff")
+DARK = colors.HexColor("#1a1a2e")
+GRAY = colors.HexColor("#6b7280")
+GRAY_LIGHT = colors.HexColor("#f3f4f6")
+GRAY_LINE = colors.HexColor("#e5e7eb")
+WHITE = colors.white
 
-BADGE_COLORS = {
-    "vert": BWIX_GREEN,
-    "jaune": YELLOW,
-    "rouge": RED,
-    "gris": GRAY,
-}
-BADGE_BG = {
-    "vert": BWIX_GREEN_LIGHT,
-    "jaune": colors.Color(254 / 255, 249 / 255, 231 / 255),
-    "rouge": colors.Color(253 / 255, 236 / 255, 236 / 255),
-    "gris": LIGHT_GRAY,
+PAGE_W, PAGE_H = A4
+MARGIN = 18 * mm
+CONTENT_W = PAGE_W - 2 * MARGIN
+
+
+# ── Ratio explanations (didactic) ─────────────────────────────────────────
+RATIO_EXPLAIN = {
+    "ebitda": "Cash genere par l'activite principale, avant amortissements, financement et impots.",
+    "marge_ebitda": "Part du chiffre d'affaires convertie en cash operationnel.",
+    "marge_nette": "Part du CA restant en benefice net apres toutes les charges.",
+    "roe": "Rendement pour les actionnaires : benefice net / capitaux propres.",
+    "roa": "Efficacite globale des actifs a generer du profit.",
+    "solvabilite": "Part des fonds propres dans le bilan. > 30% = autonomie financiere saine.",
+    "liquidite_generale": "Actifs court terme / dettes court terme. > 1 = capacite a payer ses dettes.",
+    "gearing": "Dette nette / capitaux propres. Mesure le levier financier.",
+    "dettes_ebitda": "Annees necessaires pour rembourser la dette avec l'EBITDA. < 3 = sain.",
+    "couverture_interets": "Nombre de fois que le resultat couvre les charges financieres. > 3 = confortable.",
+    "bfr": "Capital immobilise dans le cycle d'exploitation (stocks + creances - fournisseurs).",
+    "bfr_jours_ca": "BFR exprime en jours de CA. Moins c'est eleve, mieux c'est.",
 }
 
 
@@ -50,11 +66,29 @@ def _fmt_eur(v):
 def _fmt_pct(v):
     if v is None:
         return "N/A"
-    return f"{v * 100:.1f}\u202f%"
+    return f"{v * 100:.1f}%"
 
 
-def _badge_label(badge_color):
-    return {"vert": "Bon", "jaune": "Correct", "rouge": "Faible", "gris": "N/A"}.get(badge_color, "N/A")
+def _badge_label(bc):
+    return {"vert": "Bon", "jaune": "Correct", "rouge": "Faible", "gris": "N/A"}.get(bc, "")
+
+
+def _badge_color(bc):
+    return {"vert": "#00c896", "jaune": "#b8860b", "rouge": "#c0392b", "gris": "#6b7280"}.get(bc, "#6b7280")
+
+
+def _badge_bg(bc):
+    return {"vert": BWIX_LIGHT, "jaune": YELLOW_BG, "rouge": RED_BG, "gris": GRAY_LIGHT}.get(bc, GRAY_LIGHT)
+
+
+def _score_color_hex(score):
+    if score >= 70:
+        return "#00c896"
+    if score >= 50:
+        return "#f59e0b"
+    if score >= 30:
+        return "#ff8c00"
+    return "#ef4444"
 
 
 def _score_label(score):
@@ -64,112 +98,124 @@ def _score_label(score):
         return "Situation fragile"
     if score < 70:
         return "Situation correcte"
-    return "Bonne sant\u00e9 financi\u00e8re"
-
-
-def _score_color(score):
-    if score >= 70:
-        return BWIX_GREEN
-    if score >= 50:
-        return YELLOW
-    if score >= 30:
-        return colors.Color(1, 140 / 255, 0)
-    return RED
+    return "Bonne sante financiere"
 
 
 # ── Styles ─────────────────────────────────────────────────────────────────
-def _get_styles():
-    styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle("BWIXTitle", parent=styles["Heading1"], fontSize=16, textColor=DARK,
-                              spaceAfter=2, fontName="Helvetica-Bold"))
-    styles.add(ParagraphStyle("BWIXSubtitle", parent=styles["Normal"], fontSize=10, textColor=GRAY,
-                              spaceAfter=10))
-    styles.add(ParagraphStyle("BWIXSmall", parent=styles["Normal"], fontSize=8, textColor=GRAY))
-    styles.add(ParagraphStyle("BWIXSection", parent=styles["Heading2"], fontSize=12, textColor=DARK,
-                              fontName="Helvetica-Bold", spaceBefore=14, spaceAfter=6,
-                              borderWidth=0, borderPadding=0))
-    styles.add(ParagraphStyle("BWIXBody", parent=styles["Normal"], fontSize=9, textColor=DARK,
-                              leading=13))
-    styles.add(ParagraphStyle("BWIXBodySmall", parent=styles["Normal"], fontSize=8, textColor=GRAY,
-                              leading=11))
-    styles.add(ParagraphStyle("BWIXCenter", parent=styles["Normal"], fontSize=13, textColor=DARK,
-                              fontName="Helvetica-Bold", alignment=TA_CENTER))
-    styles.add(ParagraphStyle("BWIXCenterSmall", parent=styles["Normal"], fontSize=8, textColor=GRAY,
-                              alignment=TA_CENTER))
-    styles.add(ParagraphStyle("BWIXBullet", parent=styles["Normal"], fontSize=9, textColor=DARK,
-                              leading=13, leftIndent=12, bulletIndent=0))
-    return styles
+def _styles():
+    s = getSampleStyleSheet()
+    s.add(ParagraphStyle("Title1", fontName="Helvetica-Bold", fontSize=18, textColor=DARK,
+                          spaceAfter=2, leading=22))
+    s.add(ParagraphStyle("CompanyName", fontName="Helvetica-Bold", fontSize=13, textColor=DARK,
+                          spaceAfter=1, leading=16))
+    s.add(ParagraphStyle("Subtitle", fontName="Helvetica", fontSize=9, textColor=GRAY, spaceAfter=4))
+    s.add(ParagraphStyle("Tiny", fontName="Helvetica", fontSize=7, textColor=GRAY, leading=9))
+    s.add(ParagraphStyle("Section", fontName="Helvetica-Bold", fontSize=12, textColor=DARK,
+                          spaceBefore=16, spaceAfter=8, leading=15))
+    s.add(ParagraphStyle("SectionSub", fontName="Helvetica", fontSize=8, textColor=GRAY,
+                          spaceAfter=6, leading=10))
+    s.add(ParagraphStyle("Body", fontName="Helvetica", fontSize=9, textColor=DARK, leading=13))
+    s.add(ParagraphStyle("BodyBold", fontName="Helvetica-Bold", fontSize=9, textColor=DARK, leading=13))
+    s.add(ParagraphStyle("Small", fontName="Helvetica", fontSize=7.5, textColor=GRAY, leading=10))
+    s.add(ParagraphStyle("SmallItalic", fontName="Helvetica-Oblique", fontSize=7.5, textColor=GRAY, leading=10))
+    s.add(ParagraphStyle("Center", fontName="Helvetica-Bold", fontSize=14, textColor=DARK,
+                          alignment=TA_CENTER, leading=18))
+    s.add(ParagraphStyle("CenterSm", fontName="Helvetica", fontSize=8, textColor=GRAY,
+                          alignment=TA_CENTER))
+    s.add(ParagraphStyle("Bullet", fontName="Helvetica", fontSize=8.5, textColor=DARK,
+                          leading=12, leftIndent=14, bulletIndent=0))
+    s.add(ParagraphStyle("DiagTitle", fontName="Helvetica-Bold", fontSize=10, textColor=DARK,
+                          spaceBefore=8, spaceAfter=3, leading=13))
+    return s
 
 
-# ── Header / Footer ────────────────────────────────────────────────────────
-def _header_footer(canvas_obj, doc):
-    canvas_obj.saveState()
-    w, h = A4
-    # Header
-    canvas_obj.setStrokeColor(BWIX_GREEN)
-    canvas_obj.setLineWidth(1.5)
-    canvas_obj.line(18 * mm, h - 14 * mm, w - 18 * mm, h - 14 * mm)
-    canvas_obj.setFont("Helvetica-Bold", 16)
-    canvas_obj.setFillColor(BWIX_GREEN)
-    canvas_obj.drawString(18 * mm, h - 12 * mm, "BWIX.")
-    canvas_obj.setFont("Helvetica", 8)
-    canvas_obj.setFillColor(GRAY)
-    canvas_obj.drawRightString(w - 18 * mm, h - 12 * mm, "bwix.app")
+# ── Header / Footer (drawn on canvas) ─────────────────────────────────────
+def _header_footer(c, doc):
+    c.saveState()
+    # Header bar
+    c.setFillColor(BWIX)
+    c.rect(0, PAGE_H - 10 * mm, PAGE_W, 10 * mm, fill=1, stroke=0)
+    c.setFont("Helvetica-Bold", 14)
+    c.setFillColor(WHITE)
+    c.drawString(MARGIN, PAGE_H - 7.5 * mm, "BWIX.")
+    c.setFont("Helvetica", 8)
+    c.setFillColor(colors.HexColor("#b0f0dd"))
+    c.drawRightString(PAGE_W - MARGIN, PAGE_H - 7.5 * mm, "bwix.app")
     # Footer
-    canvas_obj.setStrokeColor(colors.Color(0.88, 0.88, 0.88))
-    canvas_obj.setLineWidth(0.5)
-    canvas_obj.line(18 * mm, 16 * mm, w - 18 * mm, 16 * mm)
-    canvas_obj.setFont("Helvetica", 6)
-    canvas_obj.setFillColor(GRAY)
+    c.setStrokeColor(GRAY_LINE)
+    c.setLineWidth(0.5)
+    c.line(MARGIN, 14 * mm, PAGE_W - MARGIN, 14 * mm)
+    c.setFont("Helvetica", 5.5)
+    c.setFillColor(GRAY)
     now_str = datetime.now().strftime("%d/%m/%Y")
-    footer = f"\u00a9 BWIX.app \u2014 {now_str} \u2014 Analyse indicative, non contractuelle. Consultez votre fiduciaire ou conseiller juridique pour toute d\u00e9cision."
-    canvas_obj.drawCentredString(w / 2, 11 * mm, footer)
-    # Page number
-    canvas_obj.drawRightString(w - 18 * mm, 11 * mm, f"Page {doc.page}")
-    canvas_obj.restoreState()
+    c.drawString(MARGIN, 10 * mm,
+                 f"\u00a9 BWIX.app \u2014 {now_str} \u2014 Analyse indicative, non contractuelle. "
+                 "Consultez votre fiduciaire pour toute decision.")
+    c.setFont("Helvetica", 6)
+    c.drawRightString(PAGE_W - MARGIN, 10 * mm, f"Page {doc.page}")
+    c.restoreState()
 
 
-# ── Score gauge drawing ────────────────────────────────────────────────────
-def _draw_score_gauge(canvas_obj, x, y, score, size=60):
-    """Draw a circular score gauge at (x, y)."""
-    cx, cy = x + size / 2, y + size / 2
-    r = size / 2 - 4
+# ── Score gauge (ReportLab Drawing) ────────────────────────────────────────
+def _score_drawing(score):
+    size = 72
+    d = Drawing(size, size)
+    cx, cy, r = size / 2, size / 2, 30
     # Background circle
-    canvas_obj.setStrokeColor(colors.Color(0.88, 0.88, 0.88))
-    canvas_obj.setLineWidth(5)
-    canvas_obj.circle(cx, cy, r, fill=0)
+    d.add(Circle(cx, cy, r, strokeColor=GRAY_LINE, strokeWidth=6, fillColor=None))
     # Score arc
-    score_color = _score_color(score)
-    canvas_obj.setStrokeColor(score_color)
-    canvas_obj.setLineWidth(5)
-    sweep = (score / 100) * 360
-    canvas_obj.arc(cx - r, cy - r, cx + r, cy + r, startAng=90, extent=-sweep)
+    sc = colors.HexColor(_score_color_hex(score))
+    sweep = -(score / 100) * 360
+    if score > 0:
+        d.add(Wedge(cx, cy, r, 90, 90 + sweep, strokeColor=sc, strokeWidth=6,
+                     fillColor=None, yradius=r))
     # Score text
-    canvas_obj.setFont("Helvetica-Bold", 18)
-    canvas_obj.setFillColor(DARK)
-    canvas_obj.drawCentredString(cx, cy - 2, str(score))
-    canvas_obj.setFont("Helvetica", 7)
-    canvas_obj.setFillColor(GRAY)
-    canvas_obj.drawCentredString(cx, cy - 12, "/100")
+    d.add(String(cx, cy - 4, str(score), fontName="Helvetica-Bold", fontSize=18,
+                 fillColor=DARK, textAnchor="middle"))
+    d.add(String(cx, cy - 14, "/100", fontName="Helvetica", fontSize=7,
+                 fillColor=GRAY, textAnchor="middle"))
+    return d
 
 
-# ── Section header with green underline ────────────────────────────────────
-def _section_header(text, styles):
-    return Paragraph(
-        f'<font color="#00c896">\u2501</font> {text}',
-        styles["BWIXSection"],
-    )
+# ── Section header ─────────────────────────────────────────────────────────
+def _section(text, st, subtitle=None):
+    els = [
+        HRFlowable(width="100%", thickness=2, color=BWIX, spaceBefore=10, spaceAfter=0),
+        Paragraph(text, st["Section"]),
+    ]
+    if subtitle:
+        els.append(Paragraph(subtitle, st["SectionSub"]))
+    return els
 
 
-# ── Build ratio table data ─────────────────────────────────────────────────
-def _build_ratio_table(data, styles):
+# ── Colored box ────────────────────────────────────────────────────────────
+def _box_table(inner_elements, bg_color=BWIX_LIGHT, border_color=BWIX):
+    """Wrap elements in a colored rounded box using a 1-cell table."""
+    cell = []
+    for el in inner_elements:
+        cell.append(el)
+    t = Table([[cell]], colWidths=[CONTENT_W - 8])
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), bg_color),
+        ("BOX", (0, 0), (-1, -1), 1, border_color),
+        ("TOPPADDING", (0, 0), (-1, -1), 10),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+        ("LEFTPADDING", (0, 0), (-1, -1), 12),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+        ("ROUNDEDCORNERS", [6, 6, 6, 6]),
+    ]))
+    return t
+
+
+# ── Ratio table with explanations ─────────────────────────────────────────
+def _ratio_table(data, st):
     ratios = data.get("ratios", {})
     badges = ratios.get("badges", {})
     rent = ratios.get("rentabilite", {})
     struct = ratios.get("structure", {})
     liq = ratios.get("liquidite", {})
 
-    def _fval(v, fmt="eur"):
+    def _fv(v, fmt):
         if v is None:
             return "N/A"
         if fmt == "eur":
@@ -185,324 +231,418 @@ def _build_ratio_table(data, styles):
         return str(v)
 
     rows_def = [
-        ("EBITDA", _fval(rent.get("ebitda")), None),
-        ("Marge EBITDA", _fval(rent.get("marge_ebitda"), "pct"), None),
-        ("Marge nette", _fval(rent.get("marge_nette"), "pct"), None),
-        ("ROE", _fval(rent.get("roe"), "pct"), badges.get("roe")),
-        ("ROA", _fval(rent.get("roa"), "pct"), None),
-        ("Solvabilit\u00e9", _fval(struct.get("solvabilite"), "pct"), badges.get("solvabilite")),
-        ("Liquidit\u00e9 g\u00e9n\u00e9rale", _fval(liq.get("liquidite_generale"), "ratio"), badges.get("liquidite")),
-        ("Gearing", _fval(struct.get("gearing"), "ratio"), badges.get("gearing")),
-        ("Dette nette / EBITDA", _fval(struct.get("dettes_ebitda"), "x"), badges.get("dette_ebitda")),
-        ("Couverture int\u00e9r\u00eats", _fval(struct.get("couverture_interets"), "x"), badges.get("couverture")),
-        ("BFR", _fval(liq.get("bfr")), None),
-        ("BFR (jours CA)", _fval(liq.get("bfr_jours_ca"), "days"), None),
+        ("Rentabilite", None, None, None, None),
+        ("EBITDA", _fv(rent.get("ebitda"), "eur"), None, "ebitda", None),
+        ("Marge EBITDA", _fv(rent.get("marge_ebitda"), "pct"), None, "marge_ebitda", None),
+        ("Marge nette", _fv(rent.get("marge_nette"), "pct"), None, "marge_nette", None),
+        ("ROE", _fv(rent.get("roe"), "pct"), badges.get("roe"), "roe", None),
+        ("ROA", _fv(rent.get("roa"), "pct"), None, "roa", None),
+        ("Structure financiere", None, None, None, None),
+        ("Solvabilite", _fv(struct.get("solvabilite"), "pct"), badges.get("solvabilite"), "solvabilite", None),
+        ("Gearing", _fv(struct.get("gearing"), "ratio"), badges.get("gearing"), "gearing", None),
+        ("Dette / EBITDA", _fv(struct.get("dettes_ebitda"), "x"), badges.get("dette_ebitda"), "dettes_ebitda", None),
+        ("Couverture interets", _fv(struct.get("couverture_interets"), "x"), badges.get("couverture"), "couverture_interets", None),
+        ("Liquidite & BFR", None, None, None, None),
+        ("Liquidite generale", _fv(liq.get("liquidite_generale"), "ratio"), badges.get("liquidite"), "liquidite_generale", None),
+        ("BFR", _fv(liq.get("bfr"), "eur"), None, "bfr", None),
+        ("BFR (jours CA)", _fv(liq.get("bfr_jours_ca"), "days"), None, "bfr_jours_ca", None),
     ]
 
+    # Header
     header = [
-        Paragraph("<b>Ratio</b>", styles["BWIXBodySmall"]),
-        Paragraph("<b>Valeur</b>", styles["BWIXBodySmall"]),
-        Paragraph("<b>Statut</b>", styles["BWIXBodySmall"]),
-        Paragraph("<b>Benchmark</b>", styles["BWIXBodySmall"]),
+        Paragraph("<b>Indicateur</b>", st["Small"]),
+        Paragraph("<b>Valeur</b>", st["Small"]),
+        Paragraph("<b>Statut</b>", st["Small"]),
+        Paragraph("<b>Explication</b>", st["Small"]),
     ]
     table_data = [header]
 
-    row_colors = []
-    for i, (label, value, badge) in enumerate(rows_def):
+    section_rows = set()
+    for i, (label, value, badge, key, _) in enumerate(rows_def):
+        row_idx = i + 1
+        if value is None:
+            # Section separator row
+            table_data.append([
+                Paragraph(f'<b><font color="#00c896">{label}</font></b>', st["Small"]),
+                "", "", "",
+            ])
+            section_rows.add(row_idx)
+            continue
+
+        # Badge
         badge_text = ""
-        bench_text = ""
         if badge and badge.get("badge"):
             bl = badge.get("label", _badge_label(badge["badge"]))
-            bc = {"vert": "#00c896", "jaune": "#b8860b", "rouge": "#c0392b", "gris": "#666"}.get(badge["badge"], "#666")
+            bc = _badge_color(badge["badge"])
             badge_text = f'<font color="{bc}"><b>{bl}</b></font>'
-            row_colors.append((i + 1, badge["badge"]))
             if badge.get("benchmark"):
-                bench_text = badge["benchmark"]
-        else:
-            row_colors.append((i + 1, None))
+                badge_text += f'<br/><font size="6" color="#999">{badge["benchmark"]}</font>'
+
+        # Explanation
+        explain = RATIO_EXPLAIN.get(key, "")
 
         table_data.append([
-            Paragraph(label, styles["BWIXBody"]),
-            Paragraph(f"<b>{value}</b>", styles["BWIXBody"]),
-            Paragraph(badge_text, styles["BWIXBody"]),
-            Paragraph(bench_text, styles["BWIXBodySmall"]),
+            Paragraph(f"<b>{label}</b>", st["Body"]),
+            Paragraph(f"<b>{value}</b>", st["Body"]),
+            Paragraph(badge_text, st["Small"]),
+            Paragraph(f'<i><font color="#6b7280">{explain}</font></i>', st["Small"]),
         ])
 
-    col_widths = [120, 80, 55, None]
-    available = A4[0] - 36 * mm
-    col_widths[3] = available - sum(w for w in col_widths[:3])
-
-    t = Table(table_data, colWidths=col_widths, repeatRows=1)
-    style_cmds = [
-        ("BACKGROUND", (0, 0), (-1, 0), LIGHT_GRAY),
-        ("TEXTCOLOR", (0, 0), (-1, 0), GRAY),
+    col_w = [100, 70, 85, CONTENT_W - 100 - 70 - 85]
+    t = Table(table_data, colWidths=col_w, repeatRows=1)
+    cmds = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f0fdf8")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), DARK),
         ("FONTSIZE", (0, 0), (-1, -1), 8),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("LINEBELOW", (0, 0), (-1, -1), 0.5, colors.Color(0.9, 0.9, 0.9)),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("LINEBELOW", (0, 0), (-1, -1), 0.5, GRAY_LINE),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-        ("ALIGN", (2, 0), (2, -1), "CENTER"),
     ]
-    # Alternate row shading
-    for i in range(2, len(table_data), 2):
-        style_cmds.append(("BACKGROUND", (0, i), (-1, i), colors.Color(0.98, 0.98, 0.98)))
+    # Section separator styling
+    for r in section_rows:
+        cmds.append(("BACKGROUND", (0, r), (-1, r), colors.HexColor("#f8fafc")))
+        cmds.append(("SPAN", (0, r), (-1, r)))
+        cmds.append(("TOPPADDING", (0, r), (-1, r), 8))
+        cmds.append(("BOTTOMPADDING", (0, r), (-1, r), 3))
+    # Alternating rows (skip section headers)
+    data_idx = 0
+    for i in range(1, len(table_data)):
+        if i not in section_rows:
+            data_idx += 1
+            if data_idx % 2 == 0:
+                cmds.append(("BACKGROUND", (0, i), (-1, i), colors.HexColor("#fafafa")))
 
-    t.setStyle(TableStyle(style_cmds))
+    t.setStyle(TableStyle(cmds))
     return t
 
 
-# ── Build valuation detail table ───────────────────────────────────────────
-def _build_valo_table(valo, styles):
-    rows = [
-        ("EBITDA pond\u00e9r\u00e9", _fmt_eur(valo.get("ebitda_reference"))),
-        ("Multiple sectoriel", f"{valo.get('multiple_sectoriel', 'N/A')}x"),
-        ("EV/EBITDA", _fmt_eur(valo.get("ev_ebitda"))),
-        ("DCF (equity)", _fmt_eur(valo.get("dcf")) if valo.get("dcf") else "Non calculable"),
-        ("Actif net comptable", _fmt_eur(valo.get("actif_net"))),
+# ── Valuation detail table ─────────────────────────────────────────────────
+def _valo_detail(valo, st):
+    items = [
+        ("EBITDA pondere", _fmt_eur(valo.get("ebitda_reference")),
+         "Base de calcul ponderee selon le nombre d'exercices"),
+        ("Multiple sectoriel", f"{valo.get('multiple_sectoriel', 'N/A')}x",
+         "Multiple EV/EBITDA median du secteur"),
+        ("Valeur EV/EBITDA", _fmt_eur(valo.get("ev_ebitda")),
+         "EBITDA x multiple = valeur d'entreprise"),
+        ("DCF (equity)", _fmt_eur(valo.get("dcf")) if valo.get("dcf") else "Non calculable",
+         "Projection des flux de tresorerie actualises"),
+        ("Actif net comptable", _fmt_eur(valo.get("actif_net")),
+         "Capitaux propres = plancher de valorisation"),
     ]
-    table_data = [[Paragraph(l, styles["BWIXBody"]), Paragraph(f"<b>{v}</b>", styles["BWIXBody"])] for l, v in rows]
-    t = Table(table_data, colWidths=[140, 140])
+    header = [
+        Paragraph("<b>Methode</b>", st["Small"]),
+        Paragraph("<b>Montant</b>", st["Small"]),
+        Paragraph("<b>Description</b>", st["Small"]),
+    ]
+    rows = [header]
+    for label, val, desc in items:
+        rows.append([
+            Paragraph(label, st["Body"]),
+            Paragraph(f"<b>{val}</b>", st["Body"]),
+            Paragraph(f'<font color="#6b7280"><i>{desc}</i></font>', st["Small"]),
+        ])
+    t = Table(rows, colWidths=[110, 100, CONTENT_W - 210 - 12])
     t.setStyle(TableStyle([
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-        ("TOPPADDING", (0, 0), (-1, -1), 3),
-        ("LINEBELOW", (0, 0), (-1, -1), 0.3, colors.Color(0.92, 0.92, 0.92)),
+        ("BACKGROUND", (0, 0), (-1, 0), GRAY_LIGHT),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("LINEBELOW", (0, 0), (-1, -1), 0.3, GRAY_LINE),
         ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
     ]))
     return t
 
 
-# ── Build EBITDA pondere detail table ──────────────────────────────────────
-def _build_ebitda_detail(valo, styles):
+# ── EBITDA pondere breakdown ───────────────────────────────────────────────
+def _ebitda_breakdown(valo, st):
     detail = valo.get("ebitda_pondere_detail", [])
     if not detail or len(detail) < 2:
         return None
     header = [
-        Paragraph("<b>Ann\u00e9e</b>", styles["BWIXBodySmall"]),
-        Paragraph("<b>EBITDA</b>", styles["BWIXBodySmall"]),
-        Paragraph("<b>Poids</b>", styles["BWIXBodySmall"]),
-        Paragraph("<b>Contribution</b>", styles["BWIXBodySmall"]),
+        Paragraph("<b>Annee</b>", st["Small"]),
+        Paragraph("<b>EBITDA</b>", st["Small"]),
+        Paragraph("<b>Poids</b>", st["Small"]),
+        Paragraph("<b>Contribution</b>", st["Small"]),
     ]
     rows = [header]
     for d in detail:
         pct = d.get("poids_pct", int(d.get("poids", 0) * 100))
         rows.append([
-            Paragraph(str(d["annee"]), styles["BWIXBodySmall"]),
-            Paragraph(_fmt_eur(d["ebitda"]), styles["BWIXBodySmall"]),
-            Paragraph(f"{pct}%", styles["BWIXBodySmall"]),
-            Paragraph(_fmt_eur(d["contribution"]), styles["BWIXBodySmall"]),
+            Paragraph(str(d["annee"]), st["Small"]),
+            Paragraph(_fmt_eur(d["ebitda"]), st["Small"]),
+            Paragraph(f"{pct}%", st["Small"]),
+            Paragraph(f"<b>{_fmt_eur(d['contribution'])}</b>", st["Small"]),
         ])
-    t = Table(rows, colWidths=[60, 100, 50, 100])
+    t = Table(rows, colWidths=[55, 95, 45, 95])
     t.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), LIGHT_GRAY),
+        ("BACKGROUND", (0, 0), (-1, 0), GRAY_LIGHT),
         ("FONTSIZE", (0, 0), (-1, -1), 7),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
         ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
         ("ALIGN", (2, 0), (2, -1), "CENTER"),
+        ("LINEBELOW", (0, 0), (-1, -1), 0.3, GRAY_LINE),
     ]))
     return t
 
 
-# ── Diagnostic bullet list ─────────────────────────────────────────────────
-def _diag_list(title, items, color_hex, styles):
+# ── Diagnostic lists ──────────────────────────────────────────────────────
+def _diag_block(title, items, color_hex, icon, st):
     if not items:
         return []
-    elements = [Paragraph(f'<font color="{color_hex}"><b>{title}</b></font>', styles["BWIXBody"])]
+    els = [Paragraph(f'<font color="{color_hex}"><b>{icon} {title}</b></font>', st["DiagTitle"])]
     for item in items:
-        elements.append(Paragraph(f'\u2022 {item}', styles["BWIXBullet"]))
-    elements.append(Spacer(1, 6))
-    return elements
+        els.append(Paragraph(f'<font color="#374151">\u2022 {item}</font>', st["Bullet"]))
+    els.append(Spacer(1, 8))
+    return els
 
 
-# ── Productivity section ───────────────────────────────────────────────────
-def _build_productivity(prod, styles):
+# ── Productivity ──────────────────────────────────────────────────────────
+def _productivity(prod, st):
     if not prod or not prod.get("etp") or prod["etp"] <= 0:
         return []
-    elements = [_section_header(f"Productivit\u00e9 par employ\u00e9 ({prod['etp']} ETP)", styles)]
-    rows = [
-        ("EBITDA / ETP", _fmt_eur(prod.get("ebitda_par_etp"))),
-        ("Marge brute / ETP", _fmt_eur(prod.get("marge_par_etp"))),
+    els = list(_section(f"Productivite par employe \u2014 {prod['etp']} ETP", st,
+                        "Performance rapportee a l'effectif moyen"))
+    items = [
+        ("EBITDA / ETP", _fmt_eur(prod.get("ebitda_par_etp")),
+         "Cash operationnel genere par employe"),
+        ("Marge brute / ETP", _fmt_eur(prod.get("marge_par_etp")),
+         "Valeur ajoutee par employe"),
     ]
     if prod.get("ca_par_etp"):
-        rows.append(("CA / ETP", _fmt_eur(prod["ca_par_etp"])))
-    table_data = [[Paragraph(l, styles["BWIXBody"]), Paragraph(f"<b>{v}</b>", styles["BWIXBody"])] for l, v in rows]
-    t = Table(table_data, colWidths=[140, 140])
+        items.append(("CA / ETP", _fmt_eur(prod["ca_par_etp"]),
+                       "Chiffre d'affaires par employe"))
+    rows = []
+    for label, val, desc in items:
+        rows.append([
+            Paragraph(label, st["Body"]),
+            Paragraph(f"<b>{val}</b>", st["Body"]),
+            Paragraph(f'<i><font color="#6b7280">{desc}</font></i>', st["Small"]),
+        ])
+    t = Table(rows, colWidths=[110, 100, CONTENT_W - 210 - 12])
     t.setStyle(TableStyle([
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-        ("TOPPADDING", (0, 0), (-1, -1), 3),
-        ("LINEBELOW", (0, 0), (-1, -1), 0.3, colors.Color(0.92, 0.92, 0.92)),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("LINEBELOW", (0, 0), (-1, -1), 0.3, GRAY_LINE),
         ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
     ]))
-    elements.append(t)
+    els.append(t)
     if prod.get("benchmark"):
-        elements.append(Spacer(1, 3))
-        elements.append(Paragraph(prod["benchmark"], styles["BWIXBodySmall"]))
-    return elements
+        els.append(Spacer(1, 3))
+        els.append(Paragraph(f'<i>{prod["benchmark"]}</i>', st["SmallItalic"]))
+    return els
 
 
-# ── Main PDF generation ────────────────────────────────────────────────────
+# ── Evolution N vs N-1 ────────────────────────────────────────────────────
+def _evolution(data, st):
+    exercices = data.get("exercices", [])
+    if len(exercices) < 2:
+        return []
+    prev, curr = exercices[-2], exercices[-1]
+    prev_r = prev.get("ratios", {}).get("rentabilite", {})
+    curr_r = curr.get("ratios", {}).get("rentabilite", {})
+    evo_rows = []
+    for label, key in [("EBITDA", "ebitda"), ("ROE", "roe"), ("Marge EBITDA", "marge_ebitda")]:
+        vp, vc = prev_r.get(key), curr_r.get(key)
+        if vp is not None and vc is not None:
+            fmt = _fmt_eur if key == "ebitda" else _fmt_pct
+            if vc > vp:
+                arrow = '<font color="#00c896">\u2191</font>'
+            elif vc < vp:
+                arrow = '<font color="#ef4444">\u2193</font>'
+            else:
+                arrow = '\u2192'
+            evo_rows.append([
+                Paragraph(label, st["Body"]),
+                Paragraph(fmt(vp), st["Body"]),
+                Paragraph(arrow, st["Body"]),
+                Paragraph(f"<b>{fmt(vc)}</b>", st["Body"]),
+            ])
+    if not evo_rows:
+        return []
+    ap, ac = prev.get("annee", "N-1"), curr.get("annee", "N")
+    header = [
+        Paragraph("<b>Indicateur</b>", st["Small"]),
+        Paragraph(f"<b>{ap}</b>", st["Small"]),
+        Paragraph("", st["Small"]),
+        Paragraph(f"<b>{ac}</b>", st["Small"]),
+    ]
+    t = Table([header] + evo_rows, colWidths=[110, 100, 30, 100])
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), GRAY_LIGHT),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ("ALIGN", (2, 0), (2, -1), "CENTER"),
+        ("ALIGN", (3, 0), (3, -1), "RIGHT"),
+        ("LINEBELOW", (0, 0), (-1, -1), 0.3, GRAY_LINE),
+    ]))
+    return [Spacer(1, 8), Paragraph("<b>Evolution N vs N-1</b>", st["BodyBold"]), Spacer(1, 4), t]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  MAIN GENERATION
+# ══════════════════════════════════════════════════════════════════════════
 def generate_pdf(data: dict) -> bytes:
-    """Generate a PDF report from analysis data. Returns PDF bytes."""
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf, pagesize=A4,
-        leftMargin=18 * mm, rightMargin=18 * mm,
-        topMargin=20 * mm, bottomMargin=22 * mm,
+        leftMargin=MARGIN, rightMargin=MARGIN,
+        topMargin=16 * mm, bottomMargin=20 * mm,
     )
-    styles = _get_styles()
-    elements = []
+    st = _styles()
+    els = []
 
     now = datetime.now()
     date_str = now.strftime("%d/%m/%Y")
-    denomination = data.get("denomination", "Soci\u00e9t\u00e9")
+    denomination = data.get("denomination", "Societe")
     annees = data.get("annees_disponibles", [data.get("annee")])
-    annees_str = "-".join(str(a) for a in annees if a) if annees else ""
+    annees_clean = [a for a in annees if a]
+    annees_str = "-".join(str(a) for a in annees_clean) if annees_clean else ""
     score = data.get("score_sante", 50)
     valo = data.get("valorisation", {})
     ai = data.get("ai_analysis", {})
     prod = data.get("productivite")
+    secteur = data.get("secteur", "")
 
-    # ── PAGE 1: Header + Score + Valorisation ──────────────────────────
-    elements.append(Paragraph("Rapport d'analyse financi\u00e8re", styles["BWIXTitle"]))
-    elements.append(Paragraph(f"<b>{denomination}</b>", styles["BWIXBody"]))
-    elements.append(Paragraph(
-        f"Exercices : {annees_str} \u2014 G\u00e9n\u00e9r\u00e9 le {date_str}",
-        styles["BWIXSubtitle"],
+    # ── PAGE 1 : Cover + Score + Valorisation ──────────────────────────
+    els.append(Spacer(1, 6))
+    els.append(Paragraph("Rapport d'analyse financiere", st["Title1"]))
+    els.append(Paragraph(denomination, st["CompanyName"]))
+    els.append(Paragraph(
+        f"Exercices {annees_str}  |  Secteur : {secteur or 'Non specifie'}  |  Genere le {date_str}",
+        st["Subtitle"],
     ))
-    elements.append(Paragraph(
-        "Rapport g\u00e9n\u00e9r\u00e9 par BWIX.app \u2014 Analyse financi\u00e8re automatis\u00e9e depuis le bilan officiel BNB",
-        styles["BWIXSmall"],
+    els.append(Paragraph(
+        "Analyse financiere automatisee depuis le bilan officiel BNB \u2014 bwix.app",
+        st["Tiny"],
     ))
-    elements.append(Spacer(1, 10))
+    els.append(Spacer(1, 14))
 
-    # Score as table layout (gauge will be drawn via afterFlowable)
-    score_color_hex = {True: "#00c896"}.get(score >= 70,
-                      {True: "#ffb432"}.get(score >= 50,
-                      {True: "#ff8c00"}.get(score >= 30, "#ef4444")))
-    score_text = f'<font size="22" color="{score_color_hex}"><b>{score}</b></font><font size="9" color="#999"> /100</font>'
-    score_label_text = _score_label(score)
-    score_table = Table([
-        [Paragraph(score_text, styles["BWIXBody"]),
-         Paragraph(f'<b>Score sant\u00e9</b><br/><font color="#666">{score_label_text}</font>', styles["BWIXBody"])],
-    ], colWidths=[80, 200])
-    score_table.setStyle(TableStyle([
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+    # Score card
+    sc_hex = _score_color_hex(score)
+    sc_label = _score_label(score)
+    score_left = [
+        Paragraph(f'<font size="28" color="{sc_hex}"><b>{score}</b></font>'
+                  f'<font size="10" color="#999"> /100</font>', st["Body"]),
+        Spacer(1, 2),
+        Paragraph(f'<font color="{sc_hex}"><b>{sc_label}</b></font>', st["Body"]),
+    ]
+    score_right = []
+    deductions = data.get("score_deductions", [])
+    if deductions:
+        score_right.append(Paragraph("<b>Ajustements du score :</b>", st["Small"]))
+        for d in deductions[:5]:
+            score_right.append(Paragraph(
+                f'<font color="#ef4444">{d["points"]:+d} pts</font>  {d["motif"]}', st["Small"]))
+    else:
+        score_right.append(Paragraph("<b>Score sante</b>", st["Body"]))
+        score_right.append(Paragraph(
+            "Score composite base sur la rentabilite, la structure financiere, "
+            "la liquidite et les risques detectes.", st["Small"]))
+
+    score_t = Table([[score_left, score_right]], colWidths=[CONTENT_W * 0.35, CONTENT_W * 0.65])
+    score_t.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 10),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+        ("LEFTPADDING", (0, 0), (0, 0), 12),
+        ("LEFTPADDING", (1, 0), (1, 0), 16),
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f8fffe")),
+        ("BOX", (0, 0), (-1, -1), 1, BWIX),
+        ("ROUNDEDCORNERS", [6, 6, 6, 6]),
     ]))
-    elements.append(score_table)
-    elements.append(Spacer(1, 8))
+    els.append(score_t)
+    els.append(Spacer(1, 16))
 
-    # Valorisation box
-    fourchette_methode = valo.get("fourchette_methode", "")
-    elements.append(_section_header("Fourchette de valorisation", styles))
-    fourchette_text = f"{_fmt_eur(valo.get('fourchette_basse'))}  \u2014  {_fmt_eur(valo.get('fourchette_haute'))}"
-    elements.append(Paragraph(f'<font size="14"><b>{fourchette_text}</b></font>', styles["BWIXCenter"]))
-    if fourchette_methode:
-        elements.append(Paragraph(fourchette_methode, styles["BWIXCenterSmall"]))
-    elements.append(Spacer(1, 8))
+    # Valorisation
+    els.extend(_section("Valorisation de l'entreprise", st,
+                        "Fourchette estimee selon plusieurs methodes complementaires"))
+    fourchette = f"{_fmt_eur(valo.get('fourchette_basse'))}  \u2014  {_fmt_eur(valo.get('fourchette_haute'))}"
+    els.append(Paragraph(f'<font size="16"><b>{fourchette}</b></font>', st["Center"]))
+    methode = valo.get("fourchette_methode", "")
+    if methode:
+        els.append(Paragraph(methode, st["CenterSm"]))
+    els.append(Spacer(1, 12))
+    els.append(_valo_detail(valo, st))
 
-    # Valuation detail table
-    elements.append(_build_valo_table(valo, styles))
-    elements.append(Spacer(1, 4))
+    # EBITDA breakdown
+    ebd = _ebitda_breakdown(valo, st)
+    if ebd:
+        els.append(Spacer(1, 8))
+        els.append(Paragraph("<b>Detail EBITDA pondere</b>", st["Small"]))
+        els.append(Spacer(1, 3))
+        els.append(ebd)
 
-    # EBITDA pondere detail
-    ebitda_detail = _build_ebitda_detail(valo, styles)
-    if ebitda_detail:
-        elements.append(ebitda_detail)
-    elements.append(Spacer(1, 6))
+    # ── PAGE 2 : Ratios ────────────────────────────────────────────────
+    els.append(PageBreak())
+    els.extend(_section("Ratios financiers", st,
+                        "Chaque ratio est compare aux benchmarks sectoriels. "
+                        "Les explications aident a interpreter les valeurs."))
+    els.append(_ratio_table(data, st))
 
-    # ── PAGE 2: Ratios ─────────────────────────────────────────────────
-    elements.append(PageBreak())
-    elements.append(_section_header("Ratios financiers", styles))
-    elements.append(_build_ratio_table(data, styles))
-    elements.append(Spacer(1, 10))
-
-    # Evolution N vs N-1
-    exercices = data.get("exercices", [])
-    if len(exercices) >= 2:
-        prev = exercices[-2]
-        curr = exercices[-1]
-        prev_r = prev.get("ratios", {}).get("rentabilite", {})
-        curr_r = curr.get("ratios", {}).get("rentabilite", {})
-        evo_rows = []
-        for label, key in [("EBITDA", "ebitda"), ("ROE", "roe"), ("Marge EBITDA", "marge_ebitda")]:
-            v_prev = prev_r.get(key)
-            v_curr = curr_r.get(key)
-            if v_prev is not None and v_curr is not None:
-                fmt = _fmt_eur if key == "ebitda" else _fmt_pct
-                arrow = "\u2191" if v_curr > v_prev else "\u2193" if v_curr < v_prev else "\u2192"
-                evo_rows.append([
-                    Paragraph(label, styles["BWIXBodySmall"]),
-                    Paragraph(fmt(v_prev), styles["BWIXBodySmall"]),
-                    Paragraph(arrow, styles["BWIXBodySmall"]),
-                    Paragraph(f"<b>{fmt(v_curr)}</b>", styles["BWIXBodySmall"]),
-                ])
-        if evo_rows:
-            annee_prev = prev.get("annee", "N-1")
-            annee_curr = curr.get("annee", "N")
-            header = [
-                Paragraph("<b>Ratio</b>", styles["BWIXBodySmall"]),
-                Paragraph(f"<b>{annee_prev}</b>", styles["BWIXBodySmall"]),
-                Paragraph("<b>Evol.</b>", styles["BWIXBodySmall"]),
-                Paragraph(f"<b>{annee_curr}</b>", styles["BWIXBodySmall"]),
-            ]
-            evo_table = Table([header] + evo_rows, colWidths=[120, 100, 40, 100])
-            evo_table.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), LIGHT_GRAY),
-                ("FONTSIZE", (0, 0), (-1, -1), 7),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-                ("TOPPADDING", (0, 0), (-1, -1), 2),
-                ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-                ("ALIGN", (2, 0), (2, -1), "CENTER"),
-                ("ALIGN", (3, 0), (3, -1), "RIGHT"),
-            ]))
-            elements.append(Spacer(1, 6))
-            elements.append(Paragraph("<b>\u00c9volution N vs N-1</b>", styles["BWIXBodySmall"]))
-            elements.append(Spacer(1, 3))
-            elements.append(evo_table)
+    # Evolution
+    evo_els = _evolution(data, st)
+    if evo_els:
+        els.extend(evo_els)
 
     # Productivity
-    prod_elements = _build_productivity(prod, styles)
-    if prod_elements:
-        elements.append(Spacer(1, 10))
-        elements.extend(prod_elements)
+    prod_els = _productivity(prod, st)
+    if prod_els:
+        els.append(Spacer(1, 6))
+        els.extend(prod_els)
 
-    # ── PAGE 3: Diagnostic ─────────────────────────────────────────────
-    elements.append(PageBreak())
-    elements.append(_section_header("Diagnostic financier", styles))
+    # ── PAGE 3 : Diagnostic ────────────────────────────────────────────
+    els.append(PageBreak())
+    els.extend(_section("Diagnostic financier", st,
+                        "Analyse generee par intelligence artificielle a partir des donnees comptables"))
 
     synthese = ai.get("synthese", "")
     if synthese:
-        elements.append(Paragraph(synthese, styles["BWIXBody"]))
-        elements.append(Spacer(1, 10))
+        els.append(_box_table(
+            [Paragraph(f'<font color="#1a1a2e">{synthese}</font>', st["Body"])],
+            bg_color=colors.HexColor("#f0fdf8"),
+            border_color=BWIX,
+        ))
+        els.append(Spacer(1, 12))
 
-    elements.extend(_diag_list("Points forts", ai.get("points_forts", []), "#00c896", styles))
-    elements.extend(_diag_list("Points d'attention", ai.get("points_attention", []), "#b8860b", styles))
-    elements.extend(_diag_list("Risques", ai.get("risques", []), "#c0392b", styles))
-    elements.extend(_diag_list("Recommandations", ai.get("recommandations", []), "#3b82f6", styles))
+    els.extend(_diag_block("Points forts", ai.get("points_forts", []), "#00c896", "\u2714", st))
+    els.extend(_diag_block("Points d'attention", ai.get("points_attention", []), "#f59e0b", "\u26a0", st))
+    els.extend(_diag_block("Risques identifies", ai.get("risques", []), "#ef4444", "\u2716", st))
+    els.extend(_diag_block("Recommandations", ai.get("recommandations", []), "#3b82f6", "\u279c", st))
 
     valo_comment = ai.get("valorisation_commentaire", "")
     if valo_comment:
-        elements.append(Spacer(1, 6))
-        elements.append(Paragraph("<b>Commentaire valorisation</b>", styles["BWIXBody"]))
-        elements.append(Paragraph(valo_comment, styles["BWIXBody"]))
+        els.append(Spacer(1, 6))
+        els.append(Paragraph("<b>Commentaire sur la valorisation</b>", st["DiagTitle"]))
+        els.append(Paragraph(valo_comment, st["Body"]))
 
-    # Build PDF
-    doc.build(elements, onFirstPage=_header_footer, onLaterPages=_header_footer)
+    # Build
+    doc.build(els, onFirstPage=_header_footer, onLaterPages=_header_footer)
     return buf.getvalue()
 
 
 def generate_pdf_base64(data: dict) -> str:
-    """Generate PDF and return as base64 string (for email attachment)."""
     pdf_bytes = generate_pdf(data)
     return base64.b64encode(pdf_bytes).decode("utf-8")
 
 
 def pdf_filename(data: dict) -> str:
-    """Generate a clean filename for the PDF."""
     denom = data.get("denomination", "Analyse")
     clean = "".join(c if c.isalnum() or c in (" ", "-", "_") else "" for c in denom).strip().replace(" ", "_")
     annees = data.get("annees_disponibles", [data.get("annee")])
-    annee_str = str(annees[-1]) if annees and annees[-1] else ""
+    annees_clean = [a for a in annees if a]
+    if len(annees_clean) >= 2:
+        annee_str = f"{annees_clean[0]}-{annees_clean[-1]}"
+    elif annees_clean:
+        annee_str = str(annees_clean[0])
+    else:
+        annee_str = ""
     return f"BWIX_{clean}_{annee_str}.pdf"
