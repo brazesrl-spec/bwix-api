@@ -173,6 +173,8 @@ def _badge(val, seuil, higher_is_better=True):
     bon = seuil.get('bon', seuil.get('modere', 0))
     correct = seuil.get('correct', seuil.get('modere', 0))
     if higher_is_better:
+        if bon and val >= bon * 1.3:
+            return {'badge': 'vert', 'label': 'Excellent'}
         if val >= bon:
             return {'badge': 'vert', 'label': 'Bon'}
         elif val >= correct:
@@ -181,6 +183,8 @@ def _badge(val, seuil, higher_is_better=True):
             return {'badge': 'rouge', 'label': 'Faible'}
     else:
         # Lower is better (gearing, dette_ebitda)
+        if bon and val <= bon * 0.5:
+            return {'badge': 'vert', 'label': 'Excellent'}
         if val <= bon:
             return {'badge': 'vert', 'label': 'Bon' if 'bon' in seuil else 'Faible'}
         elif val <= correct or val <= seuil.get('modere', float('inf')):

@@ -103,6 +103,20 @@ _AMOUNT_RE = r'-?(?:\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+(?:,\d{1,2})?)'
 
 def _postprocess(data):
     """Post-processing shared by BNB and BOB parsers."""
+    # Reconstruct creances_court_terme from sub-accounts if missing
+    if not data.get('creances_court_terme'):
+        cc = (data.get('creances_commerciales', 0) or 0) + (data.get('autres_creances', 0) or 0)
+        if cc:
+            data['creances_court_terme'] = cc
+    # Reconstruct dettes_court_terme from sub-accounts if missing
+    if not data.get('dettes_court_terme'):
+        dct = ((data.get('dettes_lt_echeant_annee', 0) or 0) +
+               (data.get('dettes_financieres_ct', 0) or 0) +
+               (data.get('fournisseurs', 0) or 0) +
+               (data.get('dettes_fiscales_sociales', 0) or 0) +
+               (data.get('autres_dettes', 0) or 0))
+        if dct:
+            data['dettes_court_terme'] = dct
     if not data.get('actifs_circulants'):
         data['actifs_circulants'] = (
             data.get('stocks', 0) + data.get('creances_court_terme', 0) + data.get('tresorerie', 0)
