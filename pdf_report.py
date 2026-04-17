@@ -4,6 +4,8 @@ import base64
 import io
 from datetime import datetime
 
+from ratios import compute_badges
+
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -210,7 +212,8 @@ def _box_table(inner_elements, bg_color=BWIX_LIGHT, border_color=BWIX):
 # ── Ratio table with explanations ─────────────────────────────────────────
 def _ratio_table(data, st):
     ratios = data.get("ratios", {})
-    badges = ratios.get("badges", {})
+    # Always recompute badges to include all 10 types
+    badges = compute_badges(ratios, data.get("secteur", ""))
     rent = ratios.get("rentabilite", {})
     struct = ratios.get("structure", {})
     liq = ratios.get("liquidite", {})
@@ -232,9 +235,9 @@ def _ratio_table(data, st):
 
     rows_def = [
         ("Rentabilite", None, None, None, None),
-        ("EBITDA", _fv(rent.get("ebitda"), "eur"), None, "ebitda", None),
-        ("Marge EBITDA", _fv(rent.get("marge_ebitda"), "pct"), None, "marge_ebitda", None),
-        ("Marge nette", _fv(rent.get("marge_nette"), "pct"), None, "marge_nette", None),
+        ("EBITDA", _fv(rent.get("ebitda"), "eur"), badges.get("ebitda"), "ebitda", None),
+        ("Marge EBITDA", _fv(rent.get("marge_ebitda"), "pct"), badges.get("marge_ebitda"), "marge_ebitda", None),
+        ("Marge nette", _fv(rent.get("marge_nette"), "pct"), badges.get("marge_nette"), "marge_nette", None),
         ("ROE", _fv(rent.get("roe"), "pct"), badges.get("roe"), "roe", None),
         ("ROA", _fv(rent.get("roa"), "pct"), None, "roa", None),
         ("Structure financiere", None, None, None, None),
@@ -244,8 +247,8 @@ def _ratio_table(data, st):
         ("Couverture interets", _fv(struct.get("couverture_interets"), "x"), badges.get("couverture"), "couverture_interets", None),
         ("Liquidite & BFR", None, None, None, None),
         ("Liquidite generale", _fv(liq.get("liquidite_generale"), "ratio"), badges.get("liquidite"), "liquidite_generale", None),
-        ("BFR", _fv(liq.get("bfr"), "eur"), None, "bfr", None),
-        ("BFR (jours CA)", _fv(liq.get("bfr_jours_ca"), "days"), None, "bfr_jours_ca", None),
+        ("BFR", _fv(liq.get("bfr"), "eur"), badges.get("bfr"), "bfr", None),
+        ("BFR (jours CA)", _fv(liq.get("bfr_jours_ca"), "days"), badges.get("bfr"), "bfr_jours_ca", None),
     ]
 
     # Header
