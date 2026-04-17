@@ -122,7 +122,7 @@ def _styles():
                           alignment=TA_CENTER, leading=18))
     s.add(ParagraphStyle("CenterSm", fontName="Helvetica", fontSize=8, textColor=GRAY,
                           alignment=TA_CENTER))
-    s.add(ParagraphStyle("Bullet", fontName="Helvetica", fontSize=8.5, textColor=DARK,
+    s.add(ParagraphStyle("BWIXBullet", fontName="Helvetica", fontSize=8.5, textColor=DARK,
                           leading=12, leftIndent=14, bulletIndent=0))
     s.add(ParagraphStyle("DiagTitle", fontName="Helvetica-Bold", fontSize=10, textColor=DARK,
                           spaceBefore=8, spaceAfter=3, leading=13))
@@ -398,7 +398,7 @@ def _diag_block(title, items, color_hex, icon, st):
         return []
     els = [Paragraph(f'<font color="{color_hex}"><b>{icon} {title}</b></font>', st["DiagTitle"])]
     for item in items:
-        els.append(Paragraph(f'<font color="#374151">\u2022 {item}</font>', st["Bullet"]))
+        els.append(Paragraph(f'<font color="#374151">\u2022 {item}</font>', st["BWIXBullet"]))
     els.append(Spacer(1, 8))
     return els
 
