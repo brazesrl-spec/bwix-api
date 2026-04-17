@@ -13,7 +13,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
-from extract import extract_bnb_pdf, detect_consolidated
+from extract import extract_pdf, detect_consolidated
 from pdf_report import generate_pdf, generate_pdf_base64, pdf_filename
 from ratios import (compute_ratios, compute_dcf, compute_score, compute_badges,
                      compute_productivite, compute_evolution, compute_ebitda_pondere,
@@ -348,11 +348,12 @@ async def create_analyse(
         # Check consolidated
         is_consolidated = detect_consolidated(tmp_path)
 
-        # Extract financial data
-        extracted = extract_bnb_pdf(tmp_path)
+        # Extract financial data (auto-detect BNB vs BOB)
+        extracted = extract_pdf(tmp_path)
     finally:
         os.unlink(tmp_path)  # RGPD: delete PDF immediately
 
+    detected_format = extracted.get('format', 'BNB_OFFICIEL')
     if 'error' in extracted.get('exercice', {}):
         raise HTTPException(422, f"Erreur d'extraction : {extracted['exercice']['error']}")
 
@@ -494,6 +495,34 @@ async def create_analyse(
         },
     })
 
+    # BOB: add supplementary exercises (years beyond N and N-1)
+    for extra in extracted.get('exercices_supplementaires', []):
+        extra_data = extra['comptes']
+        extra_annee = extra['annee']
+        has_data = any(v for k, v in extra_data.items() if k not in ('_ca_is_marge_brute',) and v)
+        if not has_data or extra_annee in {annee_n, annee_n1}:
+            continue
+        extra_ratios = compute_ratios(extra_data, secteur)
+        extra_badges = compute_badges(extra_ratios, secteur)
+        extra_ebitda = extra_ratios['rentabilite']['ebitda']
+        extra_prod = compute_productivite(extra_data, extra_ratios, secteur)
+        exercices.append({
+            'annee': extra_annee,
+            'ebitda': extra_ebitda,
+            'ratios': extra_ratios,
+            'badges': extra_badges,
+            'productivite': extra_prod,
+            'valorisation': {
+                'ev_ebitda': round(extra_ebitda * multiple, 2) if extra_ebitda > 0 else 0,
+                'actif_net': extra_ratios['valorisation']['valeur_capitaux_propres'],
+                'multiple_sectoriel': multiple,
+            },
+        })
+        nb_exercices += 1
+
+    # Sort exercices by year ascending
+    exercices.sort(key=lambda e: e.get('annee', 0))
+
     # Multi-year evolution
     evolution_data = compute_evolution(exercices)
 
@@ -558,6 +587,7 @@ async def create_analyse(
         'score_deductions': score_deductions,
         'ai_analysis': ai_analysis,
         'secteur': secteur,
+        'format': detected_format,
         'is_structure_particuliere': secteur in STRUCTURE_PARTICULIERE,
         'is_consolidated': is_consolidated,
         'exercices': exercices,
@@ -618,6 +648,7 @@ async def create_analyse(
     if is_admin:
         return {
             "token": token,
+            "format": detected_format,
             "is_consolidated": is_consolidated,
             "score_sante": score_sante,
             "unlocked": True,
@@ -647,6 +678,7 @@ async def create_analyse(
     # Return freemium preview — no paid data leaked
     return {
         "token": token,
+        "format": detected_format,
         "is_consolidated": is_consolidated,
         "score_sante": score_sante,
         "unlocked": False,
