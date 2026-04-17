@@ -74,6 +74,9 @@ SECTEUR_SEUILS = {
         'gearing': {'bon': 0.5, 'modere': 1.0},
         'dette_ebitda': {'bon': 2, 'correct': 4},
         'couverture': {'bon': 5, 'correct': 2},
+        'marge_ebitda': {'bon': 0.12, 'correct': 0.08},
+        'marge_nette': {'bon': 0.06, 'correct': 0.03},
+        'bfr_jours': {'bon': 30, 'modere': 90},
         'ebitda_par_etp': {'bon': 15000, 'correct': 8000},
         'multiple_bas': 4, 'multiple_central': 5, 'multiple_haut': 6.5,
         'label': 'BTP',
@@ -85,6 +88,9 @@ SECTEUR_SEUILS = {
         'gearing': {'bon': 0.3, 'modere': 0.7},
         'dette_ebitda': {'bon': 1.5, 'correct': 3},
         'couverture': {'bon': 6, 'correct': 3},
+        'marge_ebitda': {'bon': 0.18, 'correct': 0.10},
+        'marge_nette': {'bon': 0.10, 'correct': 0.05},
+        'bfr_jours': {'bon': 30, 'modere': 75},
         'ebitda_par_etp': {'bon': 20000, 'correct': 10000},
         'multiple_bas': 5, 'multiple_central': 6, 'multiple_haut': 8,
         'label': 'Services',
@@ -96,6 +102,9 @@ SECTEUR_SEUILS = {
         'gearing': {'bon': 0.5, 'modere': 1.0},
         'dette_ebitda': {'bon': 2, 'correct': 4},
         'couverture': {'bon': 4, 'correct': 2},
+        'marge_ebitda': {'bon': 0.08, 'correct': 0.05},
+        'marge_nette': {'bon': 0.04, 'correct': 0.02},
+        'bfr_jours': {'bon': 20, 'modere': 60},
         'ebitda_par_etp': {'bon': 12000, 'correct': 6000},
         'multiple_bas': 4, 'multiple_central': 5, 'multiple_haut': 6,
         'label': 'Commerce',
@@ -107,6 +116,9 @@ SECTEUR_SEUILS = {
         'gearing': {'bon': 0.5, 'modere': 1.0},
         'dette_ebitda': {'bon': 2.5, 'correct': 4},
         'couverture': {'bon': 5, 'correct': 2},
+        'marge_ebitda': {'bon': 0.15, 'correct': 0.10},
+        'marge_nette': {'bon': 0.07, 'correct': 0.04},
+        'bfr_jours': {'bon': 45, 'modere': 90},
         'ebitda_par_etp': {'bon': 15000, 'correct': 8000},
         'multiple_bas': 5, 'multiple_central': 6, 'multiple_haut': 8,
         'label': 'Industrie',
@@ -118,6 +130,9 @@ SECTEUR_SEUILS = {
         'gearing': {'bon': 0.2, 'modere': 0.5},
         'dette_ebitda': {'bon': 1, 'correct': 2},
         'couverture': {'bon': 8, 'correct': 4},
+        'marge_ebitda': {'bon': 0.25, 'correct': 0.15},
+        'marge_nette': {'bon': 0.15, 'correct': 0.08},
+        'bfr_jours': {'bon': 20, 'modere': 60},
         'ebitda_par_etp': {'bon': 40000, 'correct': 20000},
         'multiple_bas': 8, 'multiple_central': 10, 'multiple_haut': 15,
         'label': 'Tech',
@@ -130,6 +145,8 @@ SECTEUR_SEUILS = {
         'gearing': {'bon': 0.5, 'modere': 2.0},
         'dette_ebitda': {'bon': 3, 'correct': 6},
         'couverture': {'bon': 3, 'correct': 1},
+        'marge_ebitda': {'bon': 0.50, 'correct': 0.00},
+        'marge_nette': {'bon': 0.50, 'correct': 0.00},
         'multiple_bas': 3, 'multiple_central': 4, 'multiple_haut': 6,
         'label': 'Holding',
     },
@@ -140,6 +157,9 @@ SECTEUR_SEUILS = {
         'gearing': {'bon': 1.0, 'modere': 3.0},
         'dette_ebitda': {'bon': 4, 'correct': 8},
         'couverture': {'bon': 2, 'correct': 1},
+        'marge_ebitda': {'bon': 0.40, 'correct': 0.20},
+        'marge_nette': {'bon': 0.20, 'correct': 0.05},
+        'bfr_jours': {'bon': 30, 'modere': 90},
         'multiple_bas': 6, 'multiple_central': 8, 'multiple_haut': 12,
         'label': 'Immobilier',
     },
@@ -243,6 +263,54 @@ def compute_badges(ratios: dict, secteur: str = '') -> dict:
         b['benchmark'] = f"Seuil {sect_label} : > {s['correct']}x"
         b['valeur'] = round(v, 1) if v else None
         badges['couverture'] = b
+
+    # EBITDA (positive = bon, negative = faible)
+    ebitda = rent.get('ebitda')
+    if ebitda is not None:
+        if ebitda > 0:
+            badges['ebitda'] = {'badge': 'vert', 'label': 'Positif', 'valeur': round(ebitda, 0),
+                                'benchmark': f"EBITDA positif = activit\u00e9 rentable"}
+        elif ebitda == 0:
+            badges['ebitda'] = {'badge': 'jaune', 'label': 'Neutre', 'valeur': 0,
+                                'benchmark': f"EBITDA nul = seuil de rentabilit\u00e9"}
+        else:
+            badges['ebitda'] = {'badge': 'rouge', 'label': 'N\u00e9gatif', 'valeur': round(ebitda, 0),
+                                'benchmark': f"EBITDA n\u00e9gatif = activit\u00e9 non rentable"}
+
+    # Marge EBITDA (higher is better)
+    s = seuils.get('marge_ebitda')
+    if s:
+        v = rent.get('marge_ebitda')
+        if v is not None:
+            b = _badge(v, s, True)
+            b['benchmark'] = f"Seuil {sect_label} : {int(s['correct']*100)}% minimum"
+            b['valeur'] = round(v * 100, 1)
+            badges['marge_ebitda'] = b
+
+    # Marge nette (higher is better)
+    s = seuils.get('marge_nette')
+    if s:
+        v = rent.get('marge_nette')
+        if v is not None:
+            b = _badge(v, s, True)
+            b['benchmark'] = f"Seuil {sect_label} : {int(s['correct']*100)}% minimum"
+            b['valeur'] = round(v * 100, 1)
+            badges['marge_nette'] = b
+
+    # BFR en jours CA (lower is better)
+    s = seuils.get('bfr_jours')
+    if s:
+        v = liq.get('bfr_jours_ca')
+        if v is not None:
+            if v <= s['bon']:
+                badges['bfr'] = {'badge': 'vert', 'label': 'Bon', 'valeur': round(v, 0),
+                                  'benchmark': f"Seuil {sect_label} : < {s['bon']}j"}
+            elif v <= s['modere']:
+                badges['bfr'] = {'badge': 'jaune', 'label': 'Mod\u00e9r\u00e9', 'valeur': round(v, 0),
+                                  'benchmark': f"Seuil {sect_label} : < {s['bon']}j"}
+            else:
+                badges['bfr'] = {'badge': 'rouge', 'label': '\u00c9lev\u00e9', 'valeur': round(v, 0),
+                                  'benchmark': f"Seuil {sect_label} : < {s['bon']}j id\u00e9al"}
 
     return badges
 
