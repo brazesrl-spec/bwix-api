@@ -560,10 +560,15 @@ def generate_pdf(data: dict) -> bytes:
     els.append(Spacer(1, 16))
 
     # Valorisation
-    els.extend(_section("Valorisation de l'entreprise", st,
-                        "Fourchette estimee selon plusieurs methodes complementaires"))
-    fourchette = f"{_fmt_eur(valo.get('fourchette_basse'))}  \u2014  {_fmt_eur(valo.get('fourchette_haute'))}"
-    els.append(Paragraph(f'<font size="16"><b>{fourchette}</b></font>', st["Center"]))
+    els.extend(_section("Valorisation de l'entreprise", st))
+    low = valo.get('fourchette_basse')
+    high = valo.get('fourchette_haute')
+    central = round((low + high) / 2) if low and high else None
+    els.append(Paragraph('<font size="8" color="#6b7280">Valeur estimee</font>', st["CenterSm"]))
+    els.append(Paragraph(f'<font size="20" color="#00c896"><b>{_fmt_eur(central)}</b></font>', st["Center"]))
+    els.append(Spacer(1, 4))
+    fourchette = f"Fourchette : {_fmt_eur(low)}  \u2014  {_fmt_eur(high)}"
+    els.append(Paragraph(fourchette, st["CenterSm"]))
     methode = valo.get("fourchette_methode", "")
     if methode:
         els.append(Paragraph(methode, st["CenterSm"]))
