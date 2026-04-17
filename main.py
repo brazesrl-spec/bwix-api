@@ -219,14 +219,20 @@ async def send_unlock_email(email: str, token: str):
     # Generate PDF attachment
     attachments = []
     try:
+        logging.info("PDF generation starting for token=%s", token)
         rows = await _supabase_select("analyses", f"token=eq.{token}&select=data_json")
-        if rows:
+        if not rows:
+            logging.warning("PDF: no data_json found for token=%s", token)
+        else:
             data = rows[0]["data_json"] if isinstance(rows[0]["data_json"], dict) else json.loads(rows[0]["data_json"])
+            logging.info("PDF: data_json loaded, denomination=%s", data.get("denomination", "?"))
             pdf_b64 = generate_pdf_base64(data)
+            logging.info("PDF: generated %d bytes base64", len(pdf_b64))
             fname = pdf_filename(data)
             attachments.append({"filename": fname, "content": pdf_b64})
+            logging.info("PDF: attachment ready — %s", fname)
     except Exception:
-        logging.warning("PDF generation failed for email attachment (token=%s)", token)
+        logging.exception("PDF generation failed for token=%s", token)
 
     await send_email(
         email,
