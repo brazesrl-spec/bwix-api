@@ -195,6 +195,84 @@ Réponds UNIQUEMENT en JSON valide :
         }
 
 
+def run_synthese_executive(data: dict, exercices: list, ratios_data: dict,
+                            valorisation: dict, score: int) -> str:
+    """Generate a 5-sentence executive summary via Claude."""
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+    denomination = data.get('denomination', 'Societe')
+    secteur = data.get('secteur', '')
+    exercices_sorted = sorted(exercices, key=lambda e: e.get('annee', 0))
+    years = [e['annee'] for e in exercices_sorted if e.get('annee')]
+    nb_years = len(years)
+    year_min = years[0] if years else '?'
+    year_max = years[-1] if years else '?'
+
+    # CA from comptes
+    ca_first = data.get('comptes_precedent', {}).get('chiffre_affaires') or data.get('comptes_precedent', {}).get('marge_brute') or 0
+    ca_last = data.get('comptes', {}).get('chiffre_affaires') or data.get('comptes', {}).get('marge_brute') or 0
+    if not ca_first and len(exercices_sorted) >= 2:
+        e0 = exercices_sorted[0]
+        me0 = (e0.get('ratios', {}).get('rentabilite', {}).get('marge_ebitda') or 0)
+        ca_first = round(e0.get('ebitda', 0) / me0) if me0 > 0 else 0
+    if not ca_last and exercices_sorted:
+        el = exercices_sorted[-1]
+        mel = (el.get('ratios', {}).get('rentabilite', {}).get('marge_ebitda') or 0)
+        ca_last = round(el.get('ebitda', 0) / mel) if mel > 0 else 0
+    growth_pct = round((ca_last - ca_first) / ca_first * 100, 1) if ca_first and ca_first > 0 else 0
+
+    rent = ratios_data.get('rentabilite', {})
+    struct = ratios_data.get('structure', {})
+    liq = ratios_data.get('liquidite', {})
+
+    # Marge EBITDA prev year
+    marge_prev = None
+    if len(exercices_sorted) >= 2:
+        marge_prev = exercices_sorted[-2].get('ratios', {}).get('rentabilite', {}).get('marge_ebitda')
+    year_prev = years[-2] if len(years) >= 2 else '?'
+
+    valo_low = valorisation.get('fourchette_basse', 0)
+    valo_high = valorisation.get('fourchette_haute', 0)
+    valo_central = round((valo_low + valo_high) / 2) if valo_low and valo_high else 0
+
+    prompt = f"""Tu es analyste financier senior. Redige une synthese executive de {denomination} en EXACTEMENT 5 phrases.
+
+DONNEES :
+- Secteur : {secteur}
+- Exercices : {nb_years} ({year_min} -> {year_max})
+- CA dernier exercice : {ca_last:,.0f}EUR
+- CA premier exercice : {ca_first:,.0f}EUR, croissance totale : {growth_pct}%
+- EBITDA dernier exercice : {exercices_sorted[-1].get('ebitda', 0):,.0f}EUR
+- Marge EBITDA : {f'{marge_prev * 100:.1f}' if marge_prev else '?'}% ({year_prev}) -> {f'{(rent.get("marge_ebitda") or 0) * 100:.1f}'}% ({year_max})
+- ROE : {f'{(rent.get("roe") or 0) * 100:.1f}'}%
+- Gearing : {f'{struct.get("gearing", 0):.2f}'}, Dette/EBITDA : {f'{struct.get("dettes_ebitda", 0):.1f}' if struct.get("dettes_ebitda") else 'N/A'}x
+- BFR : {f'{liq.get("bfr_jours_ca", 0):.0f}' if liq.get('bfr_jours_ca') else 'N/A'} jours
+- Score BWIX : {score}/100
+- Valorisation centrale : {valo_central:,.0f}EUR (fourchette {valo_low:,.0f}EUR - {valo_high:,.0f}EUR)
+
+STRUCTURE OBLIGATOIRE (5 phrases exactement) :
+1. Identite : secteur, taille (CA), positionnement.
+2. Trajectoire : croissance CA sur la periode, tendance EBITDA.
+3. Point fort principal : le plus marquant, chiffre.
+4. Point d'attention principal : le plus critique, chiffre.
+5. Valorisation : fourchette + positionnement.
+
+CONTRAINTES :
+- 5 phrases, pas plus pas moins.
+- Chaque phrase contient au moins un chiffre.
+- 100 mots maximum au total.
+- Ton factuel et professionnel, pas vendeur.
+- Pas de "il convient de", "il est recommande de".
+- Reponds en texte brut, pas de JSON, pas de markdown."""
+
+    message = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=300,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return message.content[0].text.strip()
+
+
 # ── Resend email ────────────────────────────────────────────────────────────
 def _html_to_text(html: str) -> str:
     text = re.sub(r'<br\s*/?>', '\n', html)
@@ -609,6 +687,18 @@ async def create_analyse(
     score_sante = score_result['score']
     score_deductions = score_result['score_deductions']
 
+    # Executive summary (5 sentences)
+    synthese_executive = None
+    try:
+        synthese_executive = run_synthese_executive(
+            {'denomination': extracted.get('denomination', ''), 'secteur': secteur,
+             'comptes': data_n, 'comptes_precedent': data_n1},
+            exercices, ratios, valorisation_unified, score_sante,
+        )
+        logging.info("Synthese executive generated: %d chars", len(synthese_executive or ''))
+    except Exception:
+        logging.exception("Synthese executive generation failed")
+
     # Build full analysis payload
     token = str(uuid.uuid4())
     denomination = extracted.get('denomination', '')
@@ -630,6 +720,7 @@ async def create_analyse(
         'score_sante': score_sante,
         'score_deductions': score_deductions,
         'ai_analysis': ai_analysis,
+        'synthese_executive': synthese_executive,
         'secteur': secteur,
         'format': detected_format,
         'is_structure_particuliere': secteur in STRUCTURE_PARTICULIERE,

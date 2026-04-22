@@ -843,6 +843,13 @@ def generate_pdf(data: dict) -> bytes:
         els.append(Spacer(1, 3))
         els.append(ebd)
 
+    # Synthese executive
+    se = data.get("synthese_executive")
+    if se:
+        els.append(Spacer(1, 12))
+        els.extend(_section("Synthese", st))
+        els.append(Paragraph(se, st["Body"]))
+
     # ── PAGE 2 : Chiffres cles ───────────────────────────────────────
     els.append(PageBreak())
     els.extend(_section("Chiffres cles", st,
