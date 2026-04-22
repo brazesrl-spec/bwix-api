@@ -103,106 +103,206 @@ async def _supabase_update(table: str, match_params: str, data: dict):
         )
 
 
-# ── Claude AI analysis ─────────────────────────────────────────────────────
-def run_claude_analysis(ratios_data: dict, comptes_data: dict, secteur: str,
-                        valorisation: dict = None) -> dict:
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+# ── Claude AI analysis (4-bloc diagnostic) ───────────────────────────────
+def _build_diag_context(exercices: list, ratios_data: dict, comptes_n: dict,
+                         comptes_n1: dict, secteur: str, valorisation: dict,
+                         score: int) -> dict:
+    """Build the template variables for the diagnostic prompt."""
+    from ratios import SECTEUR_SEUILS
+    seuils = SECTEUR_SEUILS.get(secteur, {})
 
-    if valorisation is None:
-        valorisation = {}
+    exercices_sorted = sorted(exercices, key=lambda e: e.get('annee', 0))
+    years = [e['annee'] for e in exercices_sorted if e.get('annee')]
+    nb_years = len(years)
+    year_min = years[0] if years else '?'
+    year_max = years[-1] if years else '?'
+    year_prev = years[-2] if len(years) >= 2 else '?'
 
-    badges = ratios_data.get('badges', {})
-    ia_summary = {
+    rent = ratios_data.get('rentabilite', {})
+    struct = ratios_data.get('structure', {})
+    liq = ratios_data.get('liquidite', {})
+
+    # CA
+    ca_last = comptes_n.get('chiffre_affaires') or comptes_n.get('marge_brute') or 0
+    ca_first = comptes_n1.get('chiffre_affaires') or comptes_n1.get('marge_brute') or 0
+    if not ca_last and rent.get('marge_ebitda') and rent['marge_ebitda'] > 0:
+        ca_last = round(rent.get('ebitda', 0) / rent['marge_ebitda'])
+    growth_pct = round((ca_last - ca_first) / ca_first * 100, 1) if ca_first and ca_first > 0 else 0
+
+    # EBITDA first/last
+    ebitda_last = exercices_sorted[-1].get('ebitda', 0) if exercices_sorted else 0
+    ebitda_first = exercices_sorted[0].get('ebitda', 0) if exercices_sorted else 0
+
+    # Marge prev
+    marge_prev = exercices_sorted[-2].get('ratios', {}).get('rentabilite', {}).get('marge_ebitda') if len(exercices_sorted) >= 2 else None
+
+    # RN
+    rn_last = comptes_n.get('resultat_net', 0)
+    if not rn_last and rent.get('roe') and ratios_data.get('valorisation', {}).get('valeur_capitaux_propres'):
+        rn_last = round(rent['roe'] * ratios_data['valorisation']['valeur_capitaux_propres'])
+
+    valo_low = valorisation.get('fourchette_basse', 0)
+    valo_high = valorisation.get('fourchette_haute', 0)
+    valo_central = round((valo_low + valo_high) / 2) if valo_low and valo_high else 0
+
+    denomination = ''  # filled by caller
+
+    return {
+        'denomination': denomination,
         'secteur': secteur,
-        'schema_abrege': ratios_data.get('schema_abrege', False),
-        'rentabilite': ratios_data.get('rentabilite', {}),
-        'structure': ratios_data.get('structure', {}),
-        'liquidite': ratios_data.get('liquidite', {}),
-        'indicators': ratios_data.get('indicators', {}),
-        'badges_sectoriels': badges,
+        'nb_years': nb_years, 'year_min': year_min, 'year_max': year_max, 'year_prev': year_prev,
+        'ca_first': f'{ca_first:,.0f}', 'ca_last': f'{ca_last:,.0f}', 'growth_pct': growth_pct,
+        'ebitda_first': f'{ebitda_first:,.0f}', 'ebitda_last': f'{ebitda_last:,.0f}',
+        'marge_prev': f'{marge_prev * 100:.1f}' if marge_prev else '?',
+        'marge_last': f'{(rent.get("marge_ebitda") or 0) * 100:.1f}',
+        'rn_last': f'{rn_last:,.0f}',
+        'roe': f'{(rent.get("roe") or 0) * 100:.1f}',
+        'roe_seuil': f'{seuils.get("roe", {}).get("correct", 0.05) * 100:.0f}',
+        'gearing': f'{struct.get("gearing", 0):.2f}',
+        'gearing_seuil': f'{seuils.get("gearing", {}).get("bon", 0.5)}',
+        'dette_ebitda': f'{struct.get("dettes_ebitda", 0):.1f}' if struct.get('dettes_ebitda') else 'N/A',
+        'couv_int': f'{struct.get("couverture_interets", 0):.1f}' if struct.get('couverture_interets') else 'N/A',
+        'bfr_j': f'{liq.get("bfr_jours_ca", 0):.0f}' if liq.get('bfr_jours_ca') else 'N/A',
+        'bfr_seuil': str(seuils.get('bfr_jours', {}).get('bon', 30)),
+        'liq_gen': f'{liq.get("liquidite_generale", 0):.2f}' if liq.get('liquidite_generale') else 'N/A',
+        'fp': f'{ratios_data.get("valorisation", {}).get("valeur_capitaux_propres", 0):,.0f}',
+        'score': score,
+        'valo_central': f'{valo_central:,.0f}',
     }
 
-    # Build benchmarks context for Claude
-    benchmarks_lines = []
-    for k, b in badges.items():
-        if b.get('benchmark'):
-            benchmarks_lines.append(f"- {k}: valeur={b.get('valeur')}, badge={b.get('badge')}, {b['benchmark']}")
-    benchmarks_block = "\nBENCHMARKS SECTORIELS (" + secteur + ") :\n" + "\n".join(benchmarks_lines) if benchmarks_lines else ""
 
-    valo_block = f"""
-VALORISATIONS (ne pas recalculer) :
-- EBITDA de référence : {valorisation.get('ebitda_reference', 0):,.0f}€ ({valorisation.get('ebitda_reference_label', '')})
-- Multiple sectoriel : {valorisation.get('multiple_sectoriel', 5)}x
-- EV/EBITDA : {valorisation.get('ev_ebitda', 0):,.0f}€
-- DCF : {valorisation.get('dcf', 'Non calculable')}{'€' if isinstance(valorisation.get('dcf'), (int, float)) else ''}
-- Actif net corrigé : {valorisation.get('actif_net', 0):,.0f}€
-- Fourchette : {valorisation.get('fourchette_basse', 0):,.0f}€ → {valorisation.get('fourchette_haute', 0):,.0f}€"""
+def _parse_diagnostic_blocs(text: str) -> list:
+    """Parse Claude's response into 4 structured blocs."""
+    bloc_markers = ['[RENTABILITE]', '[STRUCTURE FINANCIERE]',
+                    '[CYCLE D\'EXPLOITATION (BFR)]', '[TRAJECTOIRE & VALORISATION]']
+    bloc_titles = ['Rentabilite', 'Structure financiere',
+                   'Cycle d\'exploitation (BFR)', 'Trajectoire & valorisation']
+    blocs = []
+    for i, marker in enumerate(bloc_markers):
+        start = text.find(marker)
+        if start < 0:
+            continue
+        start += len(marker)
+        # Find next marker or end
+        end = len(text)
+        for next_marker in bloc_markers[i + 1:]:
+            pos = text.find(next_marker, start)
+            if pos >= 0:
+                end = pos
+                break
+        bloc_text = text[start:end].strip()
+        lines = [l.strip() for l in bloc_text.split('\n') if l.strip()]
+        blocs.append({'title': bloc_titles[i], 'lines': lines[:4]})
+    return blocs
 
-    context = (
-        f"Données comptables :\n{json.dumps(comptes_data, indent=2, ensure_ascii=False)}\n\n"
-        f"Ratios :\n{json.dumps(ia_summary, indent=2, ensure_ascii=False)}\n\n"
-        f"{valo_block}"
-        f"{benchmarks_block}"
-    )
+
+def run_claude_analysis(ratios_data: dict, comptes_data: dict, secteur: str,
+                        valorisation: dict = None, exercices: list = None,
+                        comptes_n1: dict = None, score: int = 50,
+                        denomination: str = '') -> dict:
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    if valorisation is None:
+        valorisation = {}
+    if exercices is None:
+        exercices = []
+    if comptes_n1 is None:
+        comptes_n1 = {}
+
+    ctx = _build_diag_context(exercices, ratios_data, comptes_data,
+                               comptes_n1, secteur, valorisation, score)
+    ctx['denomination'] = denomination
+
+    prompt = f"""Tu es analyste financier senior specialise PME belges. Tu analyses {ctx['denomination']}, secteur {ctx['secteur']}.
+
+DONNEES CLES :
+- Exercices : {ctx['nb_years']} ({ctx['year_min']} -> {ctx['year_max']})
+- CA : {ctx['ca_first']}EUR ({ctx['year_min']}) -> {ctx['ca_last']}EUR ({ctx['year_max']}), croissance {ctx['growth_pct']}%
+- EBITDA : {ctx['ebitda_first']}EUR ({ctx['year_min']}) -> {ctx['ebitda_last']}EUR ({ctx['year_max']})
+- Marge EBITDA : {ctx['marge_prev']}% ({ctx['year_prev']}) -> {ctx['marge_last']}% ({ctx['year_max']})
+- Resultat net dernier exercice : {ctx['rn_last']}EUR
+- ROE : {ctx['roe']}% (seuil sectoriel {ctx['roe_seuil']}%)
+- Gearing : {ctx['gearing']} (ideal sectoriel < {ctx['gearing_seuil']})
+- Dette/EBITDA : {ctx['dette_ebitda']}x
+- Couverture interets : {ctx['couv_int']}x
+- BFR : {ctx['bfr_j']} jours (seuil sectoriel {ctx['bfr_seuil']}j)
+- Liquidite generale : {ctx['liq_gen']}
+- Capitaux propres : {ctx['fp']}EUR
+- Score BWIX : {ctx['score']}/100
+- Valorisation centrale : {ctx['valo_central']}EUR
+
+GENERE 4 BLOCS — RESPECTE STRICTEMENT CETTE STRUCTURE :
+
+[RENTABILITE]
+Constat : (1 phrase chiffree, compare au seuil sectoriel)
+Evolution : (1 phrase sur la tendance multi-annees)
+Impact : (1 phrase chiffree en EUR)
+Piste : (1 phrase commencant par "Piste :" — action concrete et specifique au secteur)
+
+[STRUCTURE FINANCIERE]
+Constat : (1 phrase chiffree)
+Evolution : (1 phrase sur la tendance)
+Impact : (1 phrase chiffree)
+Piste : (1 phrase commencant par "Piste :")
+
+[CYCLE D'EXPLOITATION (BFR)]
+Constat : (1 phrase chiffree)
+Evolution : (1 phrase sur la tendance)
+Impact : (1 phrase chiffree — ex: "Chaque jour de BFR en moins libere Xk EUR de tresorerie")
+Piste : (1 phrase commencant par "Piste :")
+
+[TRAJECTOIRE & VALORISATION]
+Constat : (1 phrase sur la dynamique globale)
+Evolution : (1 phrase sur la tendance CA/EBITDA)
+Impact : (1 phrase chiffree sur la valorisation)
+Piste : (1 phrase commencant par "Piste :")
+
+CONTRAINTES STRICTES :
+- EXACTEMENT 4 lignes par bloc (Constat / Evolution / Impact / Piste). Jamais plus.
+- Toujours chiffrer avec les donnees fournies. Pas de chiffres inventes.
+- Ton : conseil professionnel, direct, accessible.
+- INTERDIT : "il convient de", "il est recommande de", "surveiller attentivement", "analyser en profondeur", "diversifier".
+- Si {ctx['nb_years']} < 3, commence chaque bloc Evolution par "Analyse sur {ctx['nb_years']} an(s) — fiabilite limitee."
+- Reponds en texte brut. Pas de markdown, pas de JSON, pas de puces.
+- Utilise exactement les marqueurs [RENTABILITE], [STRUCTURE FINANCIERE], [CYCLE D'EXPLOITATION (BFR)], [TRAJECTOIRE & VALORISATION]."""
 
     message = client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=2000,
-        system="""Tu reçois des données financières déjà calculées par le système.
-NE PAS recalculer les valorisations toi-même.
-Utilise UNIQUEMENT les chiffres fournis dans la section VALORISATIONS ci-dessous.
-Quand tu mentionnes une fourchette de valeur, utilise uniquement fourchette_basse et fourchette_haute.
-Quand tu mentionnes la valeur EV/EBITDA, utilise uniquement ev_ebitda.
-
-Tu es un analyste financier expert en PME belges.
-Analyse ces données de façon claire, structurée et actionnable.
-Pas de jargon inutile. Sois direct sur les points forts, les risques et les recommandations prioritaires.
-
-IMPORTANT :
-- Si schema_abrege=true, ne commente pas les marges (EBITDA, nette).
-- La dette nette fournie est la dette nette BANCAIRE retraitée.
-
-CONTEXTUALISATION DES RATIOS FAIBLES :
-Quand un ratio est sous le seuil sectoriel, ne pas se contenter de le signaler. Proposer systématiquement une explication structurelle probable :
-
-- Solvabilité faible : "Peut s'expliquer par une politique de distribution active aux associés, des remontées vers une holding, ou un financement important d'actifs. À contextualiser avec votre comptable."
-- BFR élevé (>1x CA) : "Structurel dans ce secteur (délais de paiement clients 60-90 jours). Surveillez le recouvrement et la rotation des stocks."
-- Dette/EBITDA élevé (>3x) : "Peut refléter un investissement récent (immo, matériel) plutôt qu'une fragilité structurelle. Vérifier la nature et la maturité des dettes."
-- Charges financières sans dette bancaire visible : "Peut indiquer du leasing, des emprunts intra-groupe ou des dettes hors bilan. Clarification conseillée."
-- ROE faible (<8%) : "Peut résulter d'une rémunération des dirigeants via management fees non visibles dans ce bilan, ou d'une année de transition."
-
-RÈGLES :
-- Toujours signaler le ratio en point d'attention si sous le seuil — ne jamais masquer.
-- Toujours proposer une explication probable.
-- Toujours terminer par "À vérifier avec votre comptable/fiduciaire".
-- Ne jamais affirmer avec certitude — BWIX lit un bilan, pas la réalité complète.
-
-Réponds UNIQUEMENT en JSON valide :
-{
-  "synthese": "2-3 phrases résumé",
-  "points_forts": ["...", "..."],
-  "points_attention": ["...", "..."],
-  "risques": ["...", "..."],
-  "recommandations": ["...", "..."],
-  "valorisation_commentaire": "...",
-  "score_sante": 0-100
-}""",
-        messages=[{"role": "user", "content": context}],
+        messages=[{"role": "user", "content": prompt}],
     )
 
     response_text = message.content[0].text.strip()
-    if response_text.startswith('```'):
-        response_text = response_text.split('\n', 1)[1].rsplit('```', 1)[0].strip()
 
-    try:
-        return json.loads(response_text)
-    except json.JSONDecodeError:
-        return {
-            'synthese': response_text[:500],
-            'points_forts': [], 'points_attention': [], 'risques': [],
-            'recommandations': [], 'valorisation_commentaire': '',
-            'score_sante': 50,
-        }
+    # Parse structured blocs
+    blocs = _parse_diagnostic_blocs(response_text)
+
+    # Build backward-compatible dict (for frontend)
+    # Extract key lines for the old format
+    points_forts = []
+    points_attention = []
+    risques = []
+    recommandations = []
+    for b in blocs:
+        for line in b.get('lines', []):
+            lower = line.lower()
+            if lower.startswith('piste'):
+                recommandations.append(line)
+            elif lower.startswith('impact'):
+                points_attention.append(line)
+            elif lower.startswith('constat'):
+                points_forts.append(line)
+
+    return {
+        'synthese': blocs[0]['lines'][0] if blocs and blocs[0].get('lines') else response_text[:300],
+        'points_forts': points_forts[:4],
+        'points_attention': points_attention[:4],
+        'risques': risques,
+        'recommandations': recommandations[:4],
+        'valorisation_commentaire': '',
+        'score_sante': score,
+        'diagnostic_blocs': blocs,
+        'diagnostic_raw': response_text,
+    }
 
 
 def run_synthese_executive(data: dict, exercices: list, ratios_data: dict,
@@ -677,24 +777,29 @@ async def create_analyse(
     ratios['valorisation_resume']['fourchette_equity_low'] = synthese_fourchette_low
     ratios['valorisation_resume']['fourchette_equity_high'] = synthese_fourchette_high
 
-    # Claude AI analysis (CORRECTION 3: strict prompt)
-    try:
-        ai_analysis = run_claude_analysis(ratios, data_n, secteur, valorisation_unified)
-    except Exception:
-        ai_analysis = {
-            'synthese': 'Analyse IA indisponible.',
-            'points_forts': [], 'points_attention': [], 'risques': [],
-            'recommandations': [], 'valorisation_commentaire': '',
-            'score_sante': 50,
-        }
-
-    # Deterministic score with deductions (CORRECTION 1)
+    # Deterministic score (computed before AI so it can be passed to the prompt)
     score_result = compute_score(
         ratios, secteur, comptes_data=data_n,
         nb_exercices=nb_exercices, ebitda_variation=ebitda_variation
     )
     score_sante = score_result['score']
     score_deductions = score_result['score_deductions']
+
+    # Claude AI analysis (4-bloc diagnostic)
+    try:
+        ai_analysis = run_claude_analysis(
+            ratios, data_n, secteur, valorisation_unified,
+            exercices=exercices, comptes_n1=data_n1,
+            score=score_sante, denomination=extracted.get('denomination', ''),
+        )
+    except Exception:
+        logging.exception("Claude AI analysis failed")
+        ai_analysis = {
+            'synthese': 'Analyse IA indisponible.',
+            'points_forts': [], 'points_attention': [], 'risques': [],
+            'recommandations': [], 'valorisation_commentaire': '',
+            'score_sante': score_sante, 'diagnostic_blocs': [], 'diagnostic_raw': '',
+        }
 
     # Executive summary (5 sentences)
     synthese_executive = None

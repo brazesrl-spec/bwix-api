@@ -995,25 +995,42 @@ def generate_pdf(data: dict) -> bytes:
     els.extend(_section("Diagnostic financier", st,
                         "Analyse generee par intelligence artificielle a partir des donnees comptables"))
 
-    synthese = ai.get("synthese", "")
-    if synthese:
-        els.append(_box_table(
-            [Paragraph(f'<font color="#1a1a2e">{synthese}</font>', st["Body"])],
-            bg_color=colors.HexColor("#f0fdf8"),
-            border_color=BWIX,
-        ))
-        els.append(Spacer(1, 12))
+    # New 4-bloc format
+    blocs = ai.get("diagnostic_blocs", [])
+    bloc_colors = ["#00c896", "#3b82f6", "#f59e0b", "#8b5cf6"]
+    bloc_icons = ["\u2714", "\u2261", "\u21c4", "\u2197"]
 
-    els.extend(_diag_block("Points forts", ai.get("points_forts", []), "#00c896", "\u2714", st))
-    els.extend(_diag_block("Points d'attention", ai.get("points_attention", []), "#f59e0b", "\u26a0", st))
-    els.extend(_diag_block("Risques identifies", ai.get("risques", []), "#ef4444", "\u2716", st))
-    els.extend(_diag_block("Recommandations", ai.get("recommandations", []), "#3b82f6", "\u279c", st))
-
-    valo_comment = ai.get("valorisation_commentaire", "")
-    if valo_comment:
-        els.append(Spacer(1, 6))
-        els.append(Paragraph("<b>Commentaire sur la valorisation</b>", st["DiagTitle"]))
-        els.append(Paragraph(valo_comment, st["Body"]))
+    if blocs:
+        for i, bloc in enumerate(blocs):
+            color = bloc_colors[i] if i < len(bloc_colors) else "#6b7280"
+            icon = bloc_icons[i] if i < len(bloc_icons) else "\u2022"
+            els.append(Paragraph(
+                f'<font color="{color}"><b>{icon} {bloc.get("title", "")}</b></font>',
+                st["DiagTitle"],
+            ))
+            for line in bloc.get("lines", []):
+                # Bold the prefix (Constat/Evolution/Impact/Piste)
+                prefix_end = line.find(':')
+                if prefix_end > 0 and prefix_end < 12:
+                    prefix = line[:prefix_end + 1]
+                    rest = line[prefix_end + 1:]
+                    els.append(Paragraph(f'<b>{prefix}</b>{rest}', st["Body"]))
+                else:
+                    els.append(Paragraph(line, st["Body"]))
+            els.append(Spacer(1, 10))
+    else:
+        # Fallback: old format or raw text
+        raw = ai.get("diagnostic_raw", "")
+        if raw:
+            els.append(Paragraph(raw, st["Body"]))
+        else:
+            synthese = ai.get("synthese", "")
+            if synthese:
+                els.append(Paragraph(synthese, st["Body"]))
+            els.extend(_diag_block("Points forts", ai.get("points_forts", []), "#00c896", "\u2714", st))
+            els.extend(_diag_block("Points d'attention", ai.get("points_attention", []), "#f59e0b", "\u26a0", st))
+            els.extend(_diag_block("Risques", ai.get("risques", []), "#ef4444", "\u2716", st))
+            els.extend(_diag_block("Recommandations", ai.get("recommandations", []), "#3b82f6", "\u279c", st))
 
     # ── PAGE 5+ : Fiches par exercice ─────────────────────────────────
     els.extend(_fiches_exercices(data, st))
