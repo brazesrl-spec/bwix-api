@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import re
 import tempfile
 import uuid
 
@@ -195,12 +196,24 @@ Réponds UNIQUEMENT en JSON valide :
 
 
 # ── Resend email ────────────────────────────────────────────────────────────
+def _html_to_text(html: str) -> str:
+    text = re.sub(r'<br\s*/?>', '\n', html)
+    text = re.sub(r'</p>', '\n\n', text)
+    text = re.sub(r'<[^>]+>', '', text)
+    text = re.sub(r'&nbsp;', ' ', text)
+    text = re.sub(r'&mdash;|&emdash;', '\u2014', text)
+    text = re.sub(r'&[a-z]+;', '', text)
+    text = re.sub(r'\n\s*\n\s*\n', '\n\n', text)
+    return text.strip()
+
+
 async def send_email(to: str, subject: str, html: str, attachments: list = None):
     payload = {
-        "from": "BWIX <noreply@bwix.app>",
+        "from": "BWIX <analyses@bwix.app>",
         "to": [to],
         "subject": subject,
         "html": html,
+        "text": _html_to_text(html),
     }
     if attachments:
         payload["attachments"] = attachments
