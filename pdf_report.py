@@ -128,7 +128,111 @@ def _styles():
                           leading=12, leftIndent=14, bulletIndent=0))
     s.add(ParagraphStyle("DiagTitle", fontName="Helvetica-Bold", fontSize=10, textColor=DARK,
                           spaceBefore=8, spaceAfter=3, leading=13))
+    s.add(ParagraphStyle("FicheId", fontName="Helvetica", fontSize=8, textColor=colors.HexColor("#374151"),
+                          leading=11, spaceAfter=1))
+    s.add(ParagraphStyle("FiabLabel", fontName="Helvetica-Bold", fontSize=9.5, leading=13))
+    s.add(ParagraphStyle("FiabMsg", fontName="Helvetica", fontSize=8, textColor=colors.HexColor("#374151"),
+                          leading=11))
     return s
+
+
+# ── Fiche d'identite ──────────────────────────────────────────────────────
+def _fiche_identite(data, st):
+    """Build company identity lines. Skip missing fields silently."""
+    parts = []
+    # Line 1: raison sociale + BCE + forme juridique
+    line1 = []
+    if data.get("denomination"):
+        line1.append(f'<b>{data["denomination"]}</b>')
+    if data.get("bce"):
+        line1.append(f'BCE {data["bce"]}')
+    if data.get("forme_juridique"):
+        line1.append(data["forme_juridique"])
+    if line1:
+        parts.append(Paragraph(" \u2022 ".join(line1), st["FicheId"]))
+    # Line 2: adresse + secteur + NACE
+    line2 = []
+    if data.get("adresse"):
+        line2.append(f'Siege : {data["adresse"]}')
+    secteur = data.get("secteur", "")
+    if secteur:
+        nace = data.get("nace_code")
+        line2.append(f'Secteur : {secteur}' + (f' (NACE {nace})' if nace else ''))
+    if line2:
+        parts.append(Paragraph(" \u2022 ".join(line2), st["FicheId"]))
+    # Line 3: exercices
+    annees = data.get("annees_disponibles", [])
+    annees_clean = sorted([a for a in annees if a])
+    if annees_clean:
+        nb = len(annees_clean)
+        parts.append(Paragraph(
+            f'Exercices analyses : {nb} ({annees_clean[0]} \u2192 {annees_clean[-1]})',
+            st["FicheId"],
+        ))
+    # Line 4: source + date
+    fmt = data.get("format", "")
+    source = "Comptes annuels BNB" if "BNB" in fmt else "Export comptable BOB" if "BOB" in fmt else "Comptes annuels"
+    from datetime import datetime
+    date_str = datetime.now().strftime("%d/%m/%Y")
+    parts.append(Paragraph(f'Source : {source} \u2022 Genere le {date_str}', st["FicheId"]))
+    return parts
+
+
+# ── Bandeau fiabilite ─────────────────────────────────────────────────────
+_FIABILITE = {
+    "low": {
+        "label": "Analyse sur {n} exercice(s)",
+        "color": "#EA580C",
+        "bg": "#FED7AA",
+        "border": "#EA580C",
+        "message": "Pour une analyse plus robuste, un minimum de 3 exercices est conseille.",
+    },
+    "medium": {
+        "label": "Analyse correcte \u2014 3 exercices",
+        "color": "#CA8A04",
+        "bg": "#FEF3C7",
+        "border": "#CA8A04",
+        "message": "Tendance observable, valorisation ponderee credible.",
+    },
+    "high": {
+        "label": "Analyse robuste \u2014 {n} exercices",
+        "color": "#16A34A",
+        "bg": "#DCFCE7",
+        "border": "#16A34A",
+        "message": "Cycle economique visible, tendances confirmees.",
+    },
+}
+
+
+def _fiabilite_bandeau(data, st):
+    """Build reliability banner as a bordered table."""
+    annees = data.get("annees_disponibles", [])
+    nb = len([a for a in annees if a])
+    if nb <= 2:
+        cfg = _FIABILITE["low"]
+    elif nb == 3:
+        cfg = _FIABILITE["medium"]
+    else:
+        cfg = _FIABILITE["high"]
+
+    label = cfg["label"].format(n=nb)
+    col = cfg["color"]
+    inner = [
+        Paragraph(f'<font color="{col}"><b>{label}</b></font>', st["FiabLabel"]),
+        Paragraph(cfg["message"], st["FiabMsg"]),
+    ]
+    t = Table([[inner]], colWidths=[CONTENT_W - 12])
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(cfg["bg"])),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ("LEFTPADDING", (0, 0), (-1, -1), 14),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+        ("LINEBELOW", (0, 0), (-1, -1), 0, colors.white),
+        ("LINEBEFORE", (0, 0), (0, -1), 4, colors.HexColor(cfg["border"])),
+        ("ROUNDEDCORNERS", [4, 4, 4, 4]),
+    ]))
+    return t
 
 
 # ── Header / Footer (drawn on canvas) ─────────────────────────────────────
@@ -515,18 +619,17 @@ def generate_pdf(data: dict) -> bytes:
     prod = data.get("productivite")
     secteur = data.get("secteur", "")
 
-    # ── PAGE 1 : Cover + Score + Valorisation ──────────────────────────
+    # ── PAGE 1 : Cover + Fiche + Fiabilite + Score + Valorisation ────
     els.append(Spacer(1, 6))
     els.append(Paragraph("Rapport d'analyse financiere", st["Title1"]))
-    els.append(Paragraph(denomination, st["CompanyName"]))
-    els.append(Paragraph(
-        f"Exercices {annees_str}  |  Secteur : {secteur or 'Non specifie'}  |  Genere le {date_str}",
-        st["Subtitle"],
-    ))
-    els.append(Paragraph(
-        "Analyse financiere automatisee depuis le bilan officiel BNB \u2014 bwix.app",
-        st["Tiny"],
-    ))
+    els.append(Spacer(1, 6))
+
+    # Fiche d'identite
+    els.extend(_fiche_identite(data, st))
+    els.append(Spacer(1, 10))
+
+    # Bandeau fiabilite
+    els.append(_fiabilite_bandeau(data, st))
     els.append(Spacer(1, 14))
 
     # Score card
