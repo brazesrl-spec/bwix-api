@@ -585,6 +585,122 @@ def _chiffres_cles(data, st):
     return [t]
 
 
+# ── Fiches par exercice ────────────────────────────────────────────────────
+def _fiches_exercices(data, st):
+    """One compact card per exercise year."""
+    exercices = data.get("exercices", [])
+    if len(exercices) < 2:
+        return []
+
+    exercices_sorted = sorted(exercices, key=lambda e: e.get("annee", 0))
+    last_year = exercices_sorted[-1].get("annee")
+    els = []
+    els.append(PageBreak())
+    els.extend(_section("Analyse par exercice", st,
+                        "Fiche synthetique de chaque annee analysee"))
+
+    HEADER_BG = colors.HexColor("#1E3A5F")
+
+    for i, ex in enumerate(exercices_sorted):
+        annee = ex.get("annee", "?")
+        ebitda = ex.get("ebitda", 0)
+        rent = ex.get("ratios", {}).get("rentabilite", {})
+        struct = ex.get("ratios", {}).get("structure", {})
+        liq = ex.get("ratios", {}).get("liquidite", {})
+        valo_ex = ex.get("ratios", {}).get("valorisation", {})
+        prod = ex.get("productivite") or {}
+
+        # CA fallback
+        me = rent.get("marge_ebitda")
+        ca = round(ebitda / me) if ebitda and me and me > 0 else None
+
+        # RN fallback
+        roe = rent.get("roe")
+        fp = valo_ex.get("valeur_capitaux_propres")
+        rn = round(roe * fp) if roe and fp else None
+
+        # Delta CA
+        delta_ca_str = "\u2014"
+        if i > 0 and ca:
+            prev = exercices_sorted[i - 1]
+            prev_ebitda = prev.get("ebitda", 0)
+            prev_me = prev.get("ratios", {}).get("rentabilite", {}).get("marge_ebitda")
+            prev_ca = round(prev_ebitda / prev_me) if prev_ebitda and prev_me and prev_me > 0 else None
+            if prev_ca and prev_ca > 0:
+                delta = (ca - prev_ca) / prev_ca * 100
+                sign = "+" if delta >= 0 else ""
+                delta_ca_str = f"{sign}{delta:.1f}%".replace(".", ",")
+
+        def _v(val, fmt="eur"):
+            if val is None:
+                return "\u2014"
+            if fmt == "eur":
+                return _fmt_eur(val)
+            if fmt == "pct":
+                return _fmt_pct(val)
+            if fmt == "ratio":
+                return f"{val:.2f}"
+            if fmt == "x":
+                return f"{val:.1f}x"
+            if fmt == "days":
+                return f"{int(val)}j"
+            return str(val)
+
+        rows_data = [
+            ("Chiffre d'affaires", _v(ca)),
+            ("Croissance CA", delta_ca_str),
+            ("EBITDA", _v(ebitda)),
+            ("Marge EBITDA", _v(me, "pct")),
+            ("Resultat net", _v(rn)),
+            ("Marge nette", _v(rent.get("marge_nette"), "pct")),
+            ("ROE", _v(roe, "pct")),
+            ("Gearing", _v(struct.get("gearing"), "ratio")),
+            ("BFR (jours CA)", _v(liq.get("bfr_jours_ca"), "days")),
+        ]
+        if prod.get("etp"):
+            rows_data.append(("Effectif (ETP)", str(round(prod["etp"], 1))))
+
+        # Title banner
+        ref = " (exercice de reference)" if annee == last_year else ""
+        title = Paragraph(
+            f'<font color="white"><b>Exercice {annee}{ref}</b></font>', st["Body"])
+        title_t = Table([[title]], colWidths=[CONTENT_W - 8])
+        title_t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), HEADER_BG),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ("LEFTPADDING", (0, 0), (-1, -1), 10),
+            ("ROUNDEDCORNERS", [4, 4, 0, 0]),
+        ]))
+
+        # Data table
+        table_rows = []
+        for label, val in rows_data:
+            table_rows.append([
+                Paragraph(label, st["Body"]),
+                Paragraph(f"<b>{val}</b>", st["Body"]),
+            ])
+        dt = Table(table_rows, colWidths=[CONTENT_W * 0.5 - 4, CONTENT_W * 0.5 - 4])
+        cmds = [
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ("LEFTPADDING", (0, 0), (-1, -1), 10),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+            ("LINEBELOW", (0, 0), (-1, -1), 0.5, GRAY_LINE),
+            ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ]
+        for j in range(1, len(table_rows), 2):
+            cmds.append(("BACKGROUND", (0, j), (-1, j), GRAY_LIGHT))
+        dt.setStyle(TableStyle(cmds))
+
+        els.append(KeepTogether([title_t, dt]))
+        els.append(Spacer(1, 14))
+
+    return els
+
+
 def _valo_detail(valo, st):
     items = [
         ("EBITDA pondere", _fmt_eur(valo.get("ebitda_reference")),
@@ -898,6 +1014,9 @@ def generate_pdf(data: dict) -> bytes:
         els.append(Spacer(1, 6))
         els.append(Paragraph("<b>Commentaire sur la valorisation</b>", st["DiagTitle"]))
         els.append(Paragraph(valo_comment, st["Body"]))
+
+    # ── PAGE 5+ : Fiches par exercice ─────────────────────────────────
+    els.extend(_fiches_exercices(data, st))
 
     # Build
     doc.build(els, onFirstPage=_header_footer, onLaterPages=_header_footer)
