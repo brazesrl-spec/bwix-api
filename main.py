@@ -104,6 +104,11 @@ async def _supabase_update(table: str, match_params: str, data: dict):
 
 
 # ── Claude AI analysis (4-bloc diagnostic) ───────────────────────────────
+def _eur(val):
+    """Format number as European currency: 1 234 567 €"""
+    return f'{val:,.0f}'.replace(',', '\u202f') + '\u202f\u20ac'
+
+
 def _build_diag_context(exercices: list, ratios_data: dict, comptes_n: dict,
                          comptes_n1: dict, secteur: str, valorisation: dict,
                          score: int) -> dict:
@@ -151,11 +156,11 @@ def _build_diag_context(exercices: list, ratios_data: dict, comptes_n: dict,
         'denomination': denomination,
         'secteur': secteur,
         'nb_years': nb_years, 'year_min': year_min, 'year_max': year_max, 'year_prev': year_prev,
-        'ca_first': f'{ca_first:,.0f}', 'ca_last': f'{ca_last:,.0f}', 'growth_pct': growth_pct,
-        'ebitda_first': f'{ebitda_first:,.0f}', 'ebitda_last': f'{ebitda_last:,.0f}',
+        'ca_first': _eur(ca_first), 'ca_last': _eur(ca_last), 'growth_pct': growth_pct,
+        'ebitda_first': _eur(ebitda_first), 'ebitda_last': _eur(ebitda_last),
         'marge_prev': f'{marge_prev * 100:.1f}' if marge_prev else '?',
         'marge_last': f'{(rent.get("marge_ebitda") or 0) * 100:.1f}',
-        'rn_last': f'{rn_last:,.0f}',
+        'rn_last': _eur(rn_last),
         'roe': f'{(rent.get("roe") or 0) * 100:.1f}',
         'roe_seuil': f'{seuils.get("roe", {}).get("correct", 0.05) * 100:.0f}',
         'gearing': f'{struct.get("gearing", 0):.2f}',
@@ -165,9 +170,9 @@ def _build_diag_context(exercices: list, ratios_data: dict, comptes_n: dict,
         'bfr_j': f'{liq.get("bfr_jours_ca", 0):.0f}' if liq.get('bfr_jours_ca') else 'N/A',
         'bfr_seuil': str(seuils.get('bfr_jours', {}).get('bon', 30)),
         'liq_gen': f'{liq.get("liquidite_generale", 0):.2f}' if liq.get('liquidite_generale') else 'N/A',
-        'fp': f'{ratios_data.get("valorisation", {}).get("valeur_capitaux_propres", 0):,.0f}',
+        'fp': _eur(ratios_data.get("valorisation", {}).get("valeur_capitaux_propres", 0)),
         'score': score,
-        'valo_central': f'{valo_central:,.0f}',
+        'valo_central': _eur(valo_central),
     }
 
 
@@ -216,45 +221,45 @@ def run_claude_analysis(ratios_data: dict, comptes_data: dict, secteur: str,
 
 DONNEES CLES :
 - Exercices : {ctx['nb_years']} ({ctx['year_min']} -> {ctx['year_max']})
-- CA : {ctx['ca_first']}EUR ({ctx['year_min']}) -> {ctx['ca_last']}EUR ({ctx['year_max']}), croissance {ctx['growth_pct']}%
-- EBITDA : {ctx['ebitda_first']}EUR ({ctx['year_min']}) -> {ctx['ebitda_last']}EUR ({ctx['year_max']})
+- CA : {ctx['ca_first']} ({ctx['year_min']}) -> {ctx['ca_last']} ({ctx['year_max']}), croissance {ctx['growth_pct']}%
+- EBITDA : {ctx['ebitda_first']} ({ctx['year_min']}) -> {ctx['ebitda_last']} ({ctx['year_max']})
 - Marge EBITDA : {ctx['marge_prev']}% ({ctx['year_prev']}) -> {ctx['marge_last']}% ({ctx['year_max']})
-- Resultat net dernier exercice : {ctx['rn_last']}EUR
+- Resultat net dernier exercice : {ctx['rn_last']}
 - ROE : {ctx['roe']}% (seuil sectoriel {ctx['roe_seuil']}%)
 - Gearing : {ctx['gearing']} (ideal sectoriel < {ctx['gearing_seuil']})
 - Dette/EBITDA : {ctx['dette_ebitda']}x
 - Couverture interets : {ctx['couv_int']}x
 - BFR : {ctx['bfr_j']} jours (seuil sectoriel {ctx['bfr_seuil']}j)
 - Liquidite generale : {ctx['liq_gen']}
-- Capitaux propres : {ctx['fp']}EUR
+- Capitaux propres : {ctx['fp']}
 - Score BWIX : {ctx['score']}/100
-- Valorisation centrale : {ctx['valo_central']}EUR
+- Valorisation centrale : {ctx['valo_central']}
 
 GENERE 4 BLOCS — RESPECTE STRICTEMENT CETTE STRUCTURE :
 
 [RENTABILITE]
 Constat : (1 phrase chiffree, compare au seuil sectoriel)
 Evolution : (1 phrase sur la tendance multi-annees)
-Impact : (1 phrase chiffree en EUR)
-Piste : (1 phrase commencant par "Piste :" — action concrete et specifique au secteur)
+Impact : (1 phrase chiffree)
+Piste : (1 phrase d'action concrete et specifique au secteur, ne PAS commencer par "Piste :")
 
 [STRUCTURE FINANCIERE]
 Constat : (1 phrase chiffree)
 Evolution : (1 phrase sur la tendance)
 Impact : (1 phrase chiffree)
-Piste : (1 phrase commencant par "Piste :")
+Piste : (1 phrase d'action concrete, ne PAS commencer par "Piste :")
 
 [CYCLE D'EXPLOITATION (BFR)]
 Constat : (1 phrase chiffree)
 Evolution : (1 phrase sur la tendance)
-Impact : (1 phrase chiffree — ex: "Chaque jour de BFR en moins libere Xk EUR de tresorerie")
-Piste : (1 phrase commencant par "Piste :")
+Impact : (1 phrase chiffree — ex: "Chaque jour de BFR en moins libere Xk de tresorerie")
+Piste : (1 phrase d'action concrete, ne PAS commencer par "Piste :")
 
 [TRAJECTOIRE & VALORISATION]
 Constat : (1 phrase sur la dynamique globale)
 Evolution : (1 phrase sur la tendance CA/EBITDA)
 Impact : (1 phrase chiffree sur la valorisation)
-Piste : (1 phrase commencant par "Piste :")
+Piste : (1 phrase d'action concrete, ne PAS commencer par "Piste :")
 
 CONTRAINTES STRICTES :
 - EXACTEMENT 4 lignes par bloc (Constat / Evolution / Impact / Piste). Jamais plus.
@@ -350,15 +355,15 @@ def run_synthese_executive(data: dict, exercices: list, ratios_data: dict,
 DONNEES :
 - Secteur : {secteur}
 - Exercices : {nb_years} ({year_min} -> {year_max})
-- CA dernier exercice : {ca_last:,.0f}EUR
-- CA premier exercice : {ca_first:,.0f}EUR, croissance totale : {growth_pct}%
-- EBITDA dernier exercice : {exercices_sorted[-1].get('ebitda', 0):,.0f}EUR
+- CA dernier exercice : {_eur(ca_last)}
+- CA premier exercice : {_eur(ca_first)}, croissance totale : {growth_pct}%
+- EBITDA dernier exercice : {_eur(exercices_sorted[-1].get('ebitda', 0))}
 - Marge EBITDA : {f'{marge_prev * 100:.1f}' if marge_prev else '?'}% ({year_prev}) -> {f'{(rent.get("marge_ebitda") or 0) * 100:.1f}'}% ({year_max})
 - ROE : {f'{(rent.get("roe") or 0) * 100:.1f}'}%
 - Gearing : {f'{struct.get("gearing", 0):.2f}'}, Dette/EBITDA : {f'{struct.get("dettes_ebitda", 0):.1f}' if struct.get("dettes_ebitda") else 'N/A'}x
 - BFR : {f'{liq.get("bfr_jours_ca", 0):.0f}' if liq.get('bfr_jours_ca') else 'N/A'} jours
 - Score BWIX : {score}/100
-- Valorisation centrale : {valo_central:,.0f}EUR (fourchette {valo_low:,.0f}EUR - {valo_high:,.0f}EUR)
+- Valorisation centrale : {_eur(valo_central)} (fourchette {_eur(valo_low)} - {_eur(valo_high)})
 
 STRUCTURE OBLIGATOIRE (5 phrases exactement) :
 1. Identite : secteur, taille (CA), positionnement.
