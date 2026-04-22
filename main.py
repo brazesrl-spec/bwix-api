@@ -454,7 +454,6 @@ async def create_analyse(
     """Upload PDF → extract → compute ratios → Claude analysis → store in Supabase."""
     is_admin = bool(ADMIN_SECRET and admin == ADMIN_SECRET)
     if is_admin:
-        import logging
         logging.warning("ADMIN MODE — analyse for %s", email)
     if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(400, "Seuls les fichiers PDF sont acceptés.")
