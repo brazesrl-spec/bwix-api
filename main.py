@@ -204,52 +204,71 @@ async def send_email(to: str, subject: str, html: str, attachments: list = None)
     }
     if attachments:
         payload["attachments"] = attachments
-    async with httpx.AsyncClient() as client:
-        await client.post(
-            "https://api.resend.com/emails",
-            headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
-            json=payload,
-        )
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
+                json=payload,
+            )
+        logging.warning("[RESEND] to=%s status=%d body=%s", to, r.status_code, r.text[:300])
+        if r.status_code >= 400:
+            logging.error("[RESEND] FAILED to=%s: %s", to, r.text)
+            return False
+        return True
+    except Exception as e:
+        logging.exception("[RESEND] EXCEPTION to=%s: %s", to, e)
+        return False
 
 
 async def send_unlock_email(email: str, token: str):
     """Send analysis unlock confirmation email with PDF attachment."""
-    link = f"{FRONTEND_URL}/resultats?token={token}"
-
-    # Generate PDF attachment
-    attachments = []
+    logging.warning("[UNLOCK_EMAIL] start email=%s token=%s", email, token)
     try:
-        logging.info("PDF generation starting for token=%s", token)
-        rows = await _supabase_select("analyses", f"token=eq.{token}&select=data_json")
-        if not rows:
-            logging.warning("PDF: no data_json found for token=%s", token)
-        else:
-            data = rows[0]["data_json"] if isinstance(rows[0]["data_json"], dict) else json.loads(rows[0]["data_json"])
-            logging.info("PDF: data_json loaded, denomination=%s", data.get("denomination", "?"))
-            pdf_b64 = generate_pdf_base64(data)
-            logging.info("PDF: generated %d bytes base64", len(pdf_b64))
-            fname = pdf_filename(data)
-            attachments.append({"filename": fname, "content": pdf_b64})
-            logging.info("PDF: attachment ready — %s", fname)
-    except Exception:
-        logging.exception("PDF generation failed for token=%s", token)
+        link = f"{FRONTEND_URL}/resultats?token={token}"
 
-    await send_email(
-        email,
-        "Votre analyse BWIX est pr\u00eate",
-        f"""<div style="font-family:Inter,sans-serif;max-width:600px;margin:0 auto;padding:40px 20px">
-        <h1 style="color:#1e3a5f">Votre analyse BWIX</h1>
-        <p>Votre analyse financi\u00e8re compl\u00e8te est d\u00e9sormais accessible.</p>
-        <p><a href="{link}" style="display:inline-block;background:#00c896;color:#0b1929;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:600">
-        Voir l'analyse compl\u00e8te</a></p>
-        <p style="color:#8fa3bf;font-size:14px;margin-top:24px">
-        Votre rapport est \u00e9galement disponible en pi\u00e8ce jointe (PDF) et en ligne via ce lien permanent.</p>
-        <hr style="border:none;border-top:1px solid #e2e8f0;margin:24px 0">
-        <p style="color:#8fa3bf;font-size:12px">
-        BWIX est un outil d'aide \u00e0 la d\u00e9cision indicatif. Les r\u00e9sultats ne constituent pas un conseil financier ou comptable.</p>
-        </div>""",
-        attachments=attachments if attachments else None,
-    )
+        # Fetch data for PDF
+        rows = await _supabase_select("analyses", f"token=eq.{token}&select=data_json")
+        data = None
+        if rows:
+            data = rows[0]["data_json"] if isinstance(rows[0]["data_json"], dict) else json.loads(rows[0]["data_json"])
+            logging.warning("[UNLOCK_EMAIL] data fetched, denomination=%s", data.get("denomination", "?"))
+        else:
+            logging.warning("[UNLOCK_EMAIL] no data_json found for token=%s", token)
+
+        # Generate PDF (non-blocking: email sends even if PDF fails)
+        attachments = []
+        if data:
+            try:
+                pdf_b64 = generate_pdf_base64(data)
+                fname = pdf_filename(data)
+                attachments.append({"filename": fname, "content": pdf_b64})
+                logging.warning("[UNLOCK_EMAIL] PDF ready — %s (%d chars)", fname, len(pdf_b64))
+            except Exception:
+                logging.exception("[UNLOCK_EMAIL] PDF generation FAILED")
+
+        # Send email (with or without PDF)
+        ok = await send_email(
+            email,
+            "Votre analyse BWIX est pr\u00eate",
+            f"""<div style="font-family:Inter,sans-serif;max-width:600px;margin:0 auto;padding:40px 20px">
+            <h1 style="color:#1e3a5f">Votre analyse BWIX</h1>
+            <p>Votre analyse financi\u00e8re compl\u00e8te est d\u00e9sormais accessible.</p>
+            <p><a href="{link}" style="display:inline-block;background:#00c896;color:#0b1929;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:600">
+            Voir l'analyse compl\u00e8te</a></p>
+            <p style="color:#8fa3bf;font-size:14px;margin-top:24px">
+            Votre rapport est \u00e9galement disponible en pi\u00e8ce jointe (PDF) et en ligne via ce lien permanent.</p>
+            <hr style="border:none;border-top:1px solid #e2e8f0;margin:24px 0">
+            <p style="color:#8fa3bf;font-size:12px">
+            BWIX est un outil d'aide \u00e0 la d\u00e9cision indicatif. Les r\u00e9sultats ne constituent pas un conseil financier ou comptable.</p>
+            </div>""",
+            attachments=attachments if attachments else None,
+        )
+        logging.warning("[UNLOCK_EMAIL] send_email returned ok=%s", ok)
+        return ok
+    except Exception:
+        logging.exception("[UNLOCK_EMAIL] TOP-LEVEL FAILURE for token=%s", token)
+        return False
 
 
 # ── Routes ──────────────────────────────────────────────────────────────────
@@ -315,8 +334,11 @@ async def claim_free_slot(request: Request):
     # Decrement free slots
     await _supabase_update("settings", "key=eq.free_slots", {"value": str(remaining - 1)})
 
-    # Send email
-    await send_unlock_email(email, analyse_token)
+    # Send email (non-blocking: slot claim succeeds even if email fails)
+    try:
+        await send_unlock_email(email, analyse_token)
+    except Exception:
+        logging.exception("[CLAIM_FREE] send_unlock_email failed for token=%s", analyse_token)
 
     return {"ok": True, "free_slots_remaining": remaining - 1}
 
@@ -1034,9 +1056,13 @@ async def stripe_webhook(request: Request):
             await _supabase_update("analyses", f"token=eq.{token}", update_data)
 
             # Send unlock email to real email (prefer Stripe over placeholder)
+            # Isolated: email failure must never break the webhook response
             email = stripe_email or (existing_email if existing_email != "analyse@bwix.app" else "")
             if email:
-                await send_unlock_email(email, token)
+                try:
+                    await send_unlock_email(email, token)
+                except Exception:
+                    logging.exception("[WEBHOOK] send_unlock_email failed but unlock succeeded for token=%s", token)
 
     return {"received": True}
 
@@ -1089,10 +1115,13 @@ async def redeem_code(request: Request):
     await _supabase_update("analyses", f"token=eq.{analyse_token}", {"unlocked": True})
     await _supabase_update("promo_codes", f"code=eq.{code}", {"used_count": used + 1})
 
-    # Send unlock email
-    email_rows = await _supabase_select("analyses", f"token=eq.{analyse_token}&select=email")
-    if email_rows:
-        await send_unlock_email(email_rows[0]["email"], analyse_token)
+    # Send unlock email (non-blocking: promo redeem succeeds even if email fails)
+    try:
+        email_rows = await _supabase_select("analyses", f"token=eq.{analyse_token}&select=email")
+        if email_rows:
+            await send_unlock_email(email_rows[0]["email"], analyse_token)
+    except Exception:
+        logging.exception("[REDEEM_CODE] send_unlock_email failed for token=%s", analyse_token)
 
     return {"ok": True, "message": "Analyse débloquée."}
 
