@@ -428,6 +428,163 @@ def _ratio_table(data, st):
 
 
 # ── Valuation detail table ─────────────────────────────────────────────────
+# ── Chiffres cles multi-annees ─────────────────────────────────────────────
+def _chiffres_cles(data, st):
+    """Build a multi-year key figures table from exercices data."""
+    exercices = data.get("exercices", [])
+    if len(exercices) < 2:
+        return [Paragraph(
+            '<i><font color="#6b7280">Donnees insuffisantes pour une vue multi-annuelle.</font></i>',
+            st["Body"],
+        )]
+
+    exercices_sorted = sorted(exercices, key=lambda e: e.get("annee", 0))
+    years = [e.get("annee") for e in exercices_sorted]
+    last_year = years[-1]
+
+    # Also grab raw comptes for N and N-1 (CA, resultat_net not in ratios)
+    comptes_n = data.get("comptes", {})
+    comptes_n1 = data.get("comptes_precedent", {})
+    annee_n = data.get("annee")
+    annee_n1 = data.get("annee_precedente")
+
+    def _get_comptes(ex):
+        """Get raw comptes for an exercice if available."""
+        a = ex.get("annee")
+        if a == annee_n:
+            return comptes_n
+        if a == annee_n1:
+            return comptes_n1
+        return {}
+
+    def _fe(v):
+        if v is None or v == 0:
+            return "\u2014"
+        return f"{round(v):,}\u202f\u20ac".replace(",", "\u202f")
+
+    def _fp(v):
+        if v is None:
+            return "\u2014"
+        return f"{v * 100:.1f}%".replace(".", ",")
+
+    def _dash():
+        return "\u2014"
+
+    # Build rows
+    row_defs = []
+
+    # 1. CA (comptes bruts → fallback EBITDA/marge)
+    ca_vals = []
+    for ex in exercices_sorted:
+        c = _get_comptes(ex)
+        ca = c.get("chiffre_affaires") or c.get("marge_brute")
+        if not ca:
+            ebitda = ex.get("ebitda", 0)
+            me = (ex.get("ratios", {}).get("rentabilite", {}).get("marge_ebitda"))
+            if ebitda and me and me > 0:
+                ca = round(ebitda / me)
+        ca_vals.append(ca or 0)
+    row_defs.append(("Chiffre d'affaires", [_fe(v) if v else _dash() for v in ca_vals]))
+
+    # 2. Croissance CA
+    growth = [_dash()]
+    for i in range(1, len(ca_vals)):
+        if ca_vals[i - 1] and ca_vals[i - 1] > 0 and ca_vals[i]:
+            g = (ca_vals[i] - ca_vals[i - 1]) / ca_vals[i - 1]
+            growth.append(_fp(g))
+        else:
+            growth.append(_dash())
+    row_defs.append(("Croissance CA", growth))
+
+    # 3. EBITDA
+    row_defs.append(("EBITDA", [_fe(ex.get("ebitda")) for ex in exercices_sorted]))
+
+    # 4. Marge EBITDA
+    row_defs.append(("Marge EBITDA", [
+        _fp(ex.get("ratios", {}).get("rentabilite", {}).get("marge_ebitda"))
+        for ex in exercices_sorted
+    ]))
+
+    # 5. Resultat net (comptes bruts → fallback ROE × capitaux propres)
+    rn_vals = []
+    for ex in exercices_sorted:
+        c = _get_comptes(ex)
+        rn = c.get("resultat_net")
+        if not rn:
+            roe = ex.get("ratios", {}).get("rentabilite", {}).get("roe")
+            fp = ex.get("ratios", {}).get("valorisation", {}).get("valeur_capitaux_propres")
+            if roe and fp:
+                rn = round(roe * fp)
+        rn_vals.append(rn or 0)
+    row_defs.append(("Resultat net", [_fe(v) if v else _dash() for v in rn_vals]))
+
+    # 6. Marge nette
+    row_defs.append(("Marge nette", [
+        _fp(ex.get("ratios", {}).get("rentabilite", {}).get("marge_nette"))
+        for ex in exercices_sorted
+    ]))
+
+    # 7. Capitaux propres
+    row_defs.append(("Capitaux propres", [
+        _fe(ex.get("ratios", {}).get("valorisation", {}).get("valeur_capitaux_propres"))
+        for ex in exercices_sorted
+    ]))
+
+    # 8. ETP (optional)
+    etp_vals = [ex.get("productivite", {}) or {} for ex in exercices_sorted]
+    has_etp = any(p.get("etp") for p in etp_vals)
+    if has_etp:
+        row_defs.append(("Effectif (ETP)", [
+            str(round(p["etp"], 1)) if p.get("etp") else _dash() for p in etp_vals
+        ]))
+        row_defs.append(("EBITDA / ETP", [
+            _fe(p.get("ebitda_par_etp")) if p.get("ebitda_par_etp") else _dash() for p in etp_vals
+        ]))
+
+    # Build table
+    nb_years = len(years)
+    label_w = 110
+    year_w = (CONTENT_W - label_w) / nb_years
+    col_widths = [label_w] + [year_w] * nb_years
+
+    HEADER_BG = colors.HexColor("#1E3A5F")
+
+    # Header row
+    header = [Paragraph("", st["Small"])]
+    for y in years:
+        header.append(Paragraph(f'<font color="white"><b>{y}</b></font>', st["Small"]))
+    table_data = [header]
+
+    # Data rows
+    for label, vals in row_defs:
+        row = [Paragraph(label, st["Body"])]
+        for i, v in enumerate(vals):
+            is_last = (years[i] == last_year)
+            row.append(Paragraph(f'<b>{v}</b>' if is_last else v, st["Body"]))
+        table_data.append(row)
+
+    t = Table(table_data, colWidths=col_widths, repeatRows=1)
+    cmds = [
+        ("BACKGROUND", (0, 0), (-1, 0), HEADER_BG),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("ALIGN", (1, 0), (-1, -1), "CENTER"),
+        ("ALIGN", (0, 0), (0, -1), "LEFT"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("LINEBELOW", (0, 0), (-1, -1), 0.5, GRAY_LINE),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]
+    # Zebra rows
+    for i in range(2, len(table_data), 2):
+        cmds.append(("BACKGROUND", (0, i), (-1, i), GRAY_LIGHT))
+
+    t.setStyle(TableStyle(cmds))
+    return [t]
+
+
 def _valo_detail(valo, st):
     items = [
         ("EBITDA pondere", _fmt_eur(valo.get("ebitda_reference")),
@@ -686,7 +843,13 @@ def generate_pdf(data: dict) -> bytes:
         els.append(Spacer(1, 3))
         els.append(ebd)
 
-    # ── PAGE 2 : Ratios ────────────────────────────────────────────────
+    # ── PAGE 2 : Chiffres cles ───────────────────────────────────────
+    els.append(PageBreak())
+    els.extend(_section("Chiffres cles", st,
+                        "Vue synthetique multi-annuelle des indicateurs principaux"))
+    els.extend(_chiffres_cles(data, st))
+
+    # ── PAGE 3 : Ratios ────────────────────────────────────────────────
     els.append(PageBreak())
     els.extend(_section("Ratios financiers", st,
                         "Chaque ratio est compare aux benchmarks sectoriels. "
@@ -704,7 +867,7 @@ def generate_pdf(data: dict) -> bytes:
         els.append(Spacer(1, 6))
         els.extend(prod_els)
 
-    # ── PAGE 3 : Diagnostic ────────────────────────────────────────────
+    # ── PAGE 4 : Diagnostic ────────────────────────────────────────────
     els.append(PageBreak())
     els.extend(_section("Diagnostic financier", st,
                         "Analyse generee par intelligence artificielle a partir des donnees comptables"))
