@@ -181,7 +181,7 @@ def _fiche_identite(data, st):
 # ── Bandeau fiabilite ─────────────────────────────────────────────────────
 _FIABILITE = {
     "low": {
-        "label": "Analyse sur {n} exercice(s)",
+        "label": "Analyse sur {n} exercice{s}",
         "color": "#EA580C",
         "bg": "#FED7AA",
         "border": "#EA580C",
@@ -215,7 +215,7 @@ def _fiabilite_bandeau(data, st):
     else:
         cfg = _FIABILITE["high"]
 
-    label = cfg["label"].format(n=nb)
+    label = cfg["label"].format(n=nb, s="s" if nb > 1 else "")
     col = cfg["color"]
     inner = [
         Paragraph(f'<font color="{col}"><b>{label}</b></font>', st["FiabLabel"]),
