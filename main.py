@@ -53,6 +53,16 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logging.exception("[UNHANDLED] %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error"},
+        headers={"Access-Control-Allow-Origin": "*"},
+    )
+
+
 # ── Supabase helpers ────────────────────────────────────────────────────────
 def _supabase_headers():
     return {
