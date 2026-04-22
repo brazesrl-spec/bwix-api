@@ -129,6 +129,22 @@ def _postprocess(data):
     if not data.get('resultat_net') and data.get('resultat_net_a_affecter'):
         data['resultat_net'] = data['resultat_net_a_affecter']
 
+    # Reconstruct total_actif from sub-totals if code 20/58 not found (BOB)
+    if not data.get('total_actif'):
+        immo = data.get('actifs_immobilises', 0) or 0
+        circ = data.get('actifs_circulants', 0) or 0
+        if immo or circ:
+            data['total_actif'] = immo + circ
+
+    # Reconstruct total_passif from sub-totals if code 10/49 not found (BOB)
+    if not data.get('total_passif'):
+        fp = data.get('capitaux_propres', 0) or 0
+        dettes = data.get('total_dettes', 0) or 0
+        if fp or dettes:
+            data['total_passif'] = fp + dettes
+        elif data.get('total_actif'):
+            data['total_passif'] = data['total_actif']
+
     dette_bancaire_lt = data.get('dettes_credit_lt', 0) or data.get('dettes_financieres_lt', 0) or 0
     dette_bancaire_ct = (data.get('dettes_credit_ct', 0) or 0) + (data.get('dettes_lt_echeant_annee', 0) or 0)
     tresorerie_totale = (data.get('tresorerie', 0) or 0) + (data.get('placements_tresorerie', 0) or 0)
