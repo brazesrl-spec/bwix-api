@@ -1082,13 +1082,22 @@ async def add_exercice(
     existing_exercices = existing_data.get('exercices', [])
     existing_annees = set(ex.get('annee') for ex in existing_exercices if ex.get('annee'))
 
-    # Parse new PDF
+    # Max 5 exercises (front also guards, this is the safety net)
+    if len(existing_annees) >= 5:
+        return {
+            "warning": "max_5",
+            "annees_disponibles": sorted(existing_annees),
+            "annees_nouvelles": [],
+            "annees_deja_presentes": [],
+        }
+
+    # Parse new PDF (auto-detects BNB vs BOB)
     content = await file.read()
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
         tmp.write(content)
         tmp_path = tmp.name
     try:
-        extracted = extract_bnb_pdf(tmp_path)
+        extracted = extract_pdf(tmp_path)
     finally:
         os.unlink(tmp_path)
 
@@ -1096,29 +1105,15 @@ async def add_exercice(
         raise HTTPException(422, f"Erreur d'extraction : {extracted['exercice']['error']}")
 
     secteur_key = secteur or existing_data.get('secteur', '')
+    seuils = SECTEUR_SEUILS.get(secteur_key, {})
+    multiple = seuils.get('multiple_central', 5) if seuils else 5
 
-    # Process new years, detect duplicates
-    new_exercices = []
-    duplicates = []
-    for label, data_ex in [('exercice', extracted['exercice']), ('exercice_precedent', extracted['exercice_precedent'])]:
-        annee = extracted.get('annee_exercice') if label == 'exercice' else extracted.get('annee_precedente')
-        if not annee:
-            continue
-        has_data = any(v for k, v in data_ex.items() if k not in ('_ca_is_marge_brute',) and v)
-        if not has_data:
-            continue
-        if annee in existing_annees:
-            duplicates.append(annee)
-            continue
-
+    def _build_exercice(annee, data_ex):
         ratios_ex = compute_ratios(data_ex, secteur_key)
         badges_ex = compute_badges(ratios_ex, secteur_key)
         ebitda_ex = ratios_ex['rentabilite']['ebitda']
-        seuils = SECTEUR_SEUILS.get(secteur_key, {})
-        multiple = seuils.get('multiple_central', 5) if seuils else 5
         productivite_ex = compute_productivite(data_ex, ratios_ex, secteur_key)
-
-        new_exercices.append({
+        return {
             'annee': annee,
             'ebitda': ebitda_ex,
             'ratios': ratios_ex,
@@ -1129,7 +1124,45 @@ async def add_exercice(
                 'actif_net': ratios_ex['valorisation']['valeur_capitaux_propres'],
                 'multiple_sectoriel': multiple,
             },
-        })
+        }
+
+    # Collect candidate (annee, data) tuples from N, N-1 and BOB extras
+    candidates = []
+    for label, data_ex in [('exercice', extracted['exercice']),
+                            ('exercice_precedent', extracted.get('exercice_precedent') or {})]:
+        annee = extracted.get('annee_exercice') if label == 'exercice' else extracted.get('annee_precedente')
+        if annee:
+            candidates.append((annee, data_ex))
+    for extra in extracted.get('exercices_supplementaires', []):
+        annee = extra.get('annee')
+        if annee:
+            candidates.append((annee, extra.get('comptes', {})))
+
+    # Process candidates, detect duplicates, skip empty
+    new_exercices = []
+    duplicates = []
+    seen_new = set()
+    for annee, data_ex in candidates:
+        has_data = any(v for k, v in data_ex.items() if k not in ('_ca_is_marge_brute',) and v)
+        if not has_data:
+            continue
+        if annee in existing_annees:
+            if annee not in duplicates:
+                duplicates.append(annee)
+            continue
+        if annee in seen_new:
+            continue
+        seen_new.add(annee)
+        new_exercices.append(_build_exercice(annee, data_ex))
+
+    # Cap new exercises so the merged total never exceeds 5 (existing stays intact)
+    remaining_slots = max(0, 5 - len(existing_annees))
+    truncated = []
+    if len(new_exercices) > remaining_slots:
+        new_exercices.sort(key=lambda e: e['annee'], reverse=True)
+        truncated = [ex['annee'] for ex in new_exercices[remaining_slots:]]
+        new_exercices = new_exercices[:remaining_slots]
+        new_exercices.sort(key=lambda e: e['annee'])
 
     if not new_exercices:
         return {
@@ -1201,6 +1234,7 @@ async def add_exercice(
         "ok": True,
         "annees_nouvelles": [ex['annee'] for ex in new_exercices],
         "annees_deja_presentes": duplicates,
+        "annees_ignorees_max5": truncated,
         "nb_exercices": len(all_exercices),
         "annees_disponibles": all_annees,
     }
