@@ -14,7 +14,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
-from extract import extract_pdf, detect_consolidated
+from extract import extract_pdf, analyse_pdf
 from pdf_report import generate_pdf, generate_pdf_base64, pdf_filename
 from ratios import (compute_ratios, compute_dcf, compute_score, compute_badges,
                      compute_productivite, compute_evolution, compute_ebitda_pondere,
@@ -570,13 +570,11 @@ async def create_analyse(
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
         tmp.write(content)
         tmp_path = tmp.name
+    del content  # free the upload buffer before parsing (A4)
 
     try:
-        # Check consolidated
-        is_consolidated = detect_consolidated(tmp_path)
-
-        # Extract financial data (auto-detect BNB vs BOB)
-        extracted = extract_pdf(tmp_path)
+        # Single PDF open: extraction + consolidated detection (memory-safe)
+        extracted, is_consolidated = analyse_pdf(tmp_path)
     finally:
         os.unlink(tmp_path)  # RGPD: delete PDF immediately
 
