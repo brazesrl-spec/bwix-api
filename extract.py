@@ -1,4 +1,11 @@
-"""PDF extraction — BNB official + BOB multi-exercices."""
+"""PDF extraction — BNB official + BOB multi-exercices.
+
+Memory-safe extraction: the PDF is opened ONCE per request and each page's
+pdfplumber object cache is released as soon as its text is read (flush_cache).
+Detection and parsing then run on the already-extracted text, so extraction
+VALUES are identical to the previous implementation — only the memory/CPU
+profile changes.
+"""
 
 import re
 
@@ -153,15 +160,37 @@ def _postprocess(data):
     data['dette_nette_bancaire'] = dette_bancaire_lt + dette_bancaire_ct - tresorerie_totale
 
 
+# ── Single-pass page reader (memory-safe) ──────────────────────────────────
+
+def _read_pages_text(pdf_path, max_pages=None):
+    """Open the PDF ONCE and return the list of per-page text strings.
+
+    Each page's pdfplumber object cache (chars/rects/images — the real memory
+    hog) is flushed right after its text is read, so peak memory stays close to
+    a single page rather than the whole document. The returned strings are
+    exactly what ``page.extract_text() or ''`` produced before, so downstream
+    extraction values are unchanged.
+    """
+    import pdfplumber
+    pages_text = []
+    with pdfplumber.open(pdf_path) as pdf:
+        pages = pdf.pages if max_pages is None else pdf.pages[:max_pages]
+        for page in pages:
+            pages_text.append(page.extract_text() or '')
+            try:
+                page.flush_cache()
+            except Exception:
+                pass
+    return pages_text
+
+
 # ── Format detection ───────────────────────────────────────────────────────
 
-def detect_format(pdf_path: str) -> str:
-    """Detect PDF format: BNB_OFFICIEL, BOB_MULTI_EXERCICES, or UNKNOWN."""
-    import pdfplumber
-    with pdfplumber.open(pdf_path) as pdf:
-        full_text = ""
-        for page in pdf.pages[:5]:
-            full_text += (page.extract_text() or '') + '\n'
+def _detect_format_from_text(pages_text):
+    """Detect PDF format from already-extracted page texts (first 5 pages)."""
+    full_text = ""
+    for text in pages_text[:5]:
+        full_text += (text or '') + '\n'
 
     lower = full_text.lower()
 
@@ -192,77 +221,78 @@ def detect_format(pdf_path: str) -> str:
     return "BOB_MULTI_EXERCICES"
 
 
-# ── BNB parser (existing) ─────────────────────────────────────────────────
+def detect_format(pdf_path: str) -> str:
+    """Detect PDF format: BNB_OFFICIEL, BOB_MULTI_EXERCICES, or UNKNOWN."""
+    return _detect_format_from_text(_read_pages_text(pdf_path, max_pages=5))
 
-def extract_bnb_pdf(pdf_path: str) -> dict:
-    """Extract financial data (N and N-1) from BNB annual accounts PDF."""
-    import pdfplumber
 
+# ── BNB parser ─────────────────────────────────────────────────────────────
+
+def _extract_bnb_from_text(pages_text):
+    """Extract financial data (N and N-1) from BNB page texts."""
     data_n = dict(EMPTY_DATA)
     data_n1 = dict(EMPTY_DATA)
     annee_exercice = None
     annee_precedente = None
     denomination = None
 
-    with pdfplumber.open(pdf_path) as pdf:
-        page1_text = pdf.pages[0].extract_text() or ''
+    page1_text = pages_text[0] if pages_text else ''
 
-        # Extract company name
-        m_denom = re.search(r'[Dd]\u00e9nomination\s*:\s*(.+)', page1_text)
-        if m_denom:
-            denomination = m_denom.group(1).strip()
-            for cut in ['Forme juridique', 'Adresse']:
-                if cut in denomination:
-                    denomination = denomination[:denomination.index(cut)].strip()
+    # Extract company name
+    m_denom = re.search(r'[Dd]énomination\s*:\s*(.+)', page1_text)
+    if m_denom:
+        denomination = m_denom.group(1).strip()
+        for cut in ['Forme juridique', 'Adresse']:
+            if cut in denomination:
+                denomination = denomination[:denomination.index(cut)].strip()
 
-        m = re.search(
-            r'p[ée]riode\s+du\s+\d{2}-\d{2}-(\d{4})\s+au\s+\d{2}-\d{2}-(\d{4})',
-            page1_text)
-        if m:
-            annee_exercice = int(m.group(2))
+    m = re.search(
+        r'p[ée]riode\s+du\s+\d{2}-\d{2}-(\d{4})\s+au\s+\d{2}-\d{2}-(\d{4})',
+        page1_text)
+    if m:
+        annee_exercice = int(m.group(2))
 
-        m3 = re.search(
-            r'exercice\s+pr[ée]c[ée]dent.*?au\s+\d{2}-\d{2}-(\d{4})',
-            page1_text)
-        if m3:
-            annee_precedente = int(m3.group(1))
-        elif annee_exercice:
-            annee_precedente = annee_exercice - 1
+    m3 = re.search(
+        r'exercice\s+pr[ée]c[ée]dent.*?au\s+\d{2}-\d{2}-(\d{4})',
+        page1_text)
+    if m3:
+        annee_precedente = int(m3.group(1))
+    elif annee_exercice:
+        annee_precedente = annee_exercice - 1
 
-        seen_n = set()
-        seen_n1 = set()
+    seen_n = set()
+    seen_n1 = set()
 
-        for page in pdf.pages:
-            text = page.extract_text() or ''
-            for line in text.split('\n'):
-                line = line.strip()
-                if not line or line.startswith('Page ') or line.startswith('N° '):
+    for text in pages_text:
+        for line in text.split('\n'):
+            line = line.strip()
+            if not line or line.startswith('Page ') or line.startswith('N° '):
+                continue
+
+            for code in ALL_CODES:
+                pattern = r'(?:^|\s)' + re.escape(code) + r'(?:\s|$)'
+                m = re.search(pattern, line)
+                if not m:
                     continue
 
-                for code in ALL_CODES:
-                    pattern = r'(?:^|\s)' + re.escape(code) + r'(?:\s|$)'
-                    m = re.search(pattern, line)
-                    if not m:
-                        continue
+                key = CODE_MAP[code]
+                after_code = line[m.end():].strip()
+                amounts = re.findall(_AMOUNT_RE, after_code)
 
-                    key = CODE_MAP[code]
-                    after_code = line[m.end():].strip()
-                    amounts = re.findall(_AMOUNT_RE, after_code)
-
-                    if not amounts:
-                        break
-
-                    val_n = _parse_amount(amounts[0])
-                    val_n1 = _parse_amount(amounts[1]) if len(amounts) > 1 else None
-
-                    if val_n is not None and key not in seen_n:
-                        data_n[key] = val_n
-                        seen_n.add(key)
-                    if val_n1 is not None and key not in seen_n1:
-                        data_n1[key] = val_n1
-                        seen_n1.add(key)
-
+                if not amounts:
                     break
+
+                val_n = _parse_amount(amounts[0])
+                val_n1 = _parse_amount(amounts[1]) if len(amounts) > 1 else None
+
+                if val_n is not None and key not in seen_n:
+                    data_n[key] = val_n
+                    seen_n.add(key)
+                if val_n1 is not None and key not in seen_n1:
+                    data_n1[key] = val_n1
+                    seen_n1.add(key)
+
+                break
 
     _postprocess(data_n)
     _postprocess(data_n1)
@@ -277,19 +307,20 @@ def extract_bnb_pdf(pdf_path: str) -> dict:
     }
 
 
-# ── BOB multi-exercices parser ────────────────────────────────────────────
+def extract_bnb_pdf(pdf_path: str) -> dict:
+    """Extract financial data (N and N-1) from BNB annual accounts PDF."""
+    return _extract_bnb_from_text(_read_pages_text(pdf_path))
 
-def extract_bob_pdf(pdf_path: str) -> dict:
-    """Extract financial data from BOB-style PDF with 2-5 year columns."""
-    import pdfplumber
 
-    with pdfplumber.open(pdf_path) as pdf:
-        full_text = ""
-        all_lines = []
-        for page in pdf.pages:
-            text = page.extract_text() or ''
-            full_text += text + '\n'
-            all_lines.extend(text.split('\n'))
+# ── BOB multi-exercices parser ─────────────────────────────────────────────
+
+def _extract_bob_from_text(pages_text):
+    """Extract financial data from BOB-style page texts (2-5 year columns)."""
+    full_text = ""
+    all_lines = []
+    for text in pages_text:
+        full_text += text + '\n'
+        all_lines.extend(text.split('\n'))
 
     # ── Detect year columns ────────────────────────────────────────────
     # Look for **/20XX patterns first
@@ -391,24 +422,51 @@ def extract_bob_pdf(pdf_path: str) -> dict:
     return result
 
 
-# ── Unified extraction entry point ────────────────────────────────────────
-
-def extract_pdf(pdf_path: str) -> dict:
-    """Auto-detect format and extract financial data."""
-    fmt = detect_format(pdf_path)
-    if fmt == "BOB_MULTI_EXERCICES":
-        return extract_bob_pdf(pdf_path)
-    return extract_bnb_pdf(pdf_path)
+def extract_bob_pdf(pdf_path: str) -> dict:
+    """Extract financial data from BOB-style PDF with 2-5 year columns."""
+    return _extract_bob_from_text(_read_pages_text(pdf_path))
 
 
 # ── Consolidated detection ─────────────────────────────────────────────────
 
+def _detect_consolidated_from_text(pages_text):
+    """Check first 3 page texts for consolidated-accounts keywords."""
+    for text in pages_text[:3]:
+        t = (text or '').lower()
+        if 'consolidé' in t or 'geconsolideerd' in t:
+            return True
+    return False
+
+
 def detect_consolidated(pdf_path: str) -> bool:
     """Check if a PDF contains consolidated accounts keywords."""
-    import pdfplumber
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages[:3]:
-            text = (page.extract_text() or '').lower()
-            if 'consolidé' in text or 'geconsolideerd' in text:
-                return True
-    return False
+    return _detect_consolidated_from_text(_read_pages_text(pdf_path, max_pages=3))
+
+
+# ── Unified extraction entry points ────────────────────────────────────────
+
+def extract_pdf(pdf_path: str) -> dict:
+    """Auto-detect format and extract financial data (single PDF open)."""
+    pages_text = _read_pages_text(pdf_path)
+    fmt = _detect_format_from_text(pages_text)
+    if fmt == "BOB_MULTI_EXERCICES":
+        return _extract_bob_from_text(pages_text)
+    return _extract_bnb_from_text(pages_text)
+
+
+def analyse_pdf(pdf_path: str):
+    """Single PDF open → (extracted_data, is_consolidated).
+
+    Reads every page once (releasing pdfplumber caches as it goes) and runs
+    consolidated detection, format detection and parsing on the same text.
+    Replaces the previous 3-open sequence (detect_consolidated + detect_format
+    + parser) used by the /api/analyse handler.
+    """
+    pages_text = _read_pages_text(pdf_path)
+    is_consolidated = _detect_consolidated_from_text(pages_text)
+    fmt = _detect_format_from_text(pages_text)
+    if fmt == "BOB_MULTI_EXERCICES":
+        extracted = _extract_bob_from_text(pages_text)
+    else:
+        extracted = _extract_bnb_from_text(pages_text)
+    return extracted, is_consolidated
