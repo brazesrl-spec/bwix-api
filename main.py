@@ -39,10 +39,25 @@ if STRIPE_TEST_MODE:
     logging.warning("\u26a0\ufe0f STRIPE TEST MODE ACTIF")
 else:
     STRIPE_SECRET = os.environ["STRIPE_SECRET_KEY"].strip()
-    STRIPE_PRICE_ID = os.environ.get("STRIPE_PRICE_ID", "price_1TJK3M1XczkPkPz652TlUn4J").strip()
+    # Montant affiché sur la home = 39,99 € TTC (cf. const PRICE_EUR dans bwixapp/analyse.js).
+    # ⚠ Si STRIPE_PRICE_ID est défini en env (Render), il PRIME sur ce défaut → le mettre à jour là aussi.
+    STRIPE_PRICE_ID = os.environ.get("STRIPE_PRICE_ID", "price_1TdRv71XczkPkPz6JA16d7aX").strip()
     STRIPE_WEBHOOK_SECRET = os.environ["STRIPE_WEBHOOK_SECRET"].strip()
 
 stripe.api_key = STRIPE_SECRET
+
+# Codes de lancement : débloquent l'analyse gratuitement dès la création (Jonathan, etc.).
+# Surchargeable via env LAUNCH_CODES (séparés par des virgules). Normalisés en MAJUSCULES.
+LAUNCH_CODES = {
+    c.strip().upper()
+    for c in os.environ.get("LAUNCH_CODES", "JONA2026#").split(",")
+    if c.strip()
+}
+
+
+def _is_valid_launch_code(code: str) -> bool:
+    """True si `code` est un code de lancement valide (déblocage gratuit, sans paiement)."""
+    return bool(code) and code.strip().upper() in LAUNCH_CODES
 
 app = FastAPI(title="BWIX API", version="1.0.0")
 app.add_middleware(
@@ -555,6 +570,7 @@ async def create_analyse(
     email: str = Form(...),
     secteur: str = Form(""),
     admin: str = Form(""),
+    code: str = Form(""),
 ):
     """Upload PDF → extract → compute ratios → Claude analysis → store in Supabase."""
     is_admin = bool(ADMIN_SECRET and admin == ADMIN_SECRET)
@@ -870,12 +886,14 @@ async def create_analyse(
     }
 
     # Store in Supabase
+    # Déblocage gratuit si admin OU code de lancement valide (ex. JONA2026#).
+    code_unlock = _is_valid_launch_code(code)
     record = await _supabase_insert("analyses", {
         "token": token,
         "email": email.strip().lower(),
         "pdf_hash": pdf_hash,
         "data_json": full_data,
-        "unlocked": is_admin,
+        "unlocked": is_admin or code_unlock,
     })
 
     # Common response fields
