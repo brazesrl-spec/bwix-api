@@ -5,6 +5,7 @@ import json
 import os
 import re
 import tempfile
+import pdfplumber
 import uuid
 
 import anthropic
@@ -58,6 +59,12 @@ LAUNCH_CODES = {
 def _is_valid_launch_code(code: str) -> bool:
     """True si `code` est un code de lancement valide (déblocage gratuit, sans paiement)."""
     return bool(code) and code.strip().upper() in LAUNCH_CODES
+
+
+# Garde-fous dépôt (format optimisé PME). Le front re-vérifie aussi la taille
+# côté navigateur (cf. const MAX_MB dans bwixapp/analyse.js — garder alignés).
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024   # 5 Mo
+MAX_PAGES = 100                       # bloc dur (mention UX : ~80 pages)
 
 app = FastAPI(title="BWIX API", version="1.0.0")
 app.add_middleware(
@@ -581,6 +588,12 @@ async def create_analyse(
 
     # Save to temp file
     content = await file.read()
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            413,
+            f"Dépôt de {len(content)/1048576:.1f} Mo : au-delà du format optimisé PME "
+            f"(max {MAX_UPLOAD_BYTES//1048576} Mo). Pour un dépôt volumineux ou consolidé, contactez-nous."
+        )
     pdf_hash = hashlib.sha256(content).hexdigest()
 
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
@@ -589,6 +602,23 @@ async def create_analyse(
     del content  # free the upload buffer before parsing (A4)
 
     try:
+        # Cap pages — lit l'arbre des pages seulement (bon marché, pas d'extraction).
+        # Dans le try : le finally supprime le temp file même en cas de refus (RGPD).
+        try:
+            with pdfplumber.open(tmp_path) as _pdf:
+                n_pages = len(_pdf.pages)
+        except Exception:
+            raise HTTPException(
+                422,
+                "PDF illisible. Vérifiez qu'il s'agit bien d'un dépôt BNB ou d'un export BOB/Sage."
+            )
+        if n_pages > MAX_PAGES:
+            raise HTTPException(
+                413,
+                f"Dépôt de {n_pages} pages : au-delà du format optimisé PME (~80 pages conseillées). "
+                "Pour un dépôt volumineux ou consolidé, contactez-nous."
+            )
+
         # Single PDF open: extraction + consolidated detection (memory-safe)
         extracted, is_consolidated = analyse_pdf(tmp_path)
     finally:
