@@ -924,6 +924,7 @@ async def create_analyse(
         "pdf_hash": pdf_hash,
         "data_json": full_data,
         "unlocked": is_admin or code_unlock,
+        "launch_code": code.strip().upper() if code_unlock else None,
     })
 
     # Common response fields
