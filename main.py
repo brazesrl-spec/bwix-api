@@ -227,7 +227,7 @@ def run_claude_analysis(ratios_data: dict, comptes_data: dict, secteur: str,
                         valorisation: dict = None, exercices: list = None,
                         comptes_n1: dict = None, score: int = 50,
                         denomination: str = '') -> dict:
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=60, max_retries=1)
     if valorisation is None:
         valorisation = {}
     if exercices is None:
@@ -293,7 +293,7 @@ CONTRAINTES STRICTES :
 - Utilise exactement les marqueurs [RENTABILITE], [STRUCTURE FINANCIERE], [CYCLE D'EXPLOITATION (BFR)], [TRAJECTOIRE & VALORISATION]."""
 
     message = client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-sonnet-4-5",
         max_tokens=2000,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -335,7 +335,7 @@ CONTRAINTES STRICTES :
 def run_synthese_executive(data: dict, exercices: list, ratios_data: dict,
                             valorisation: dict, score: int) -> str:
     """Generate a 5-sentence executive summary via Claude."""
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=60, max_retries=1)
 
     denomination = data.get('denomination', 'Societe')
     secteur = data.get('secteur', '')
@@ -403,7 +403,7 @@ CONTRAINTES :
 - Reponds en texte brut, pas de JSON, pas de markdown."""
 
     message = client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-sonnet-4-5",
         max_tokens=300,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -841,8 +841,8 @@ async def create_analyse(
             exercices=exercices, comptes_n1=data_n1,
             score=score_sante, denomination=extracted.get('denomination', ''),
         )
-    except Exception:
-        logging.exception("Claude AI analysis failed")
+    except Exception as e:
+        logging.exception(f"Claude AI failed: {type(e).__name__}: {e}")
         ai_analysis = {
             'synthese': 'Analyse IA indisponible.',
             'points_forts': [], 'points_attention': [], 'risques': [],
