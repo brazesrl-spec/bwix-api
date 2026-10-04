@@ -235,11 +235,16 @@ def run_claude_analysis(ratios_data: dict, comptes_data: dict, secteur: str,
     if comptes_n1 is None:
         comptes_n1 = {}
 
-    ctx = _build_diag_context(exercices, ratios_data, comptes_data,
-                               comptes_n1, secteur, valorisation, score)
-    ctx['denomination'] = denomination
+    try:
+        ctx = _build_diag_context(exercices, ratios_data, comptes_data,
+                                   comptes_n1, secteur, valorisation, score)
+        ctx['denomination'] = denomination
+    except Exception as e:
+        logging.exception(f"Claude step 1/4 (_build_diag_context) failed: {type(e).__name__}: {e}")
+        raise
 
-    prompt = f"""Tu es analyste financier senior specialise PME belges. Tu analyses {ctx['denomination']}, secteur {ctx['secteur']}.
+    try:
+        prompt = f"""Tu es analyste financier senior specialise PME belges. Tu analyses {ctx['denomination']}, secteur {ctx['secteur']}.
 
 DONNEES CLES :
 - Exercices : {ctx['nb_years']} ({ctx['year_min']} -> {ctx['year_max']})
@@ -291,17 +296,27 @@ CONTRAINTES STRICTES :
 - Si {ctx['nb_years']} < 3, commence chaque bloc Evolution par "Analyse sur {ctx['nb_years']} an(s) — fiabilite limitee."
 - Reponds en texte brut. Pas de markdown, pas de JSON, pas de puces.
 - Utilise exactement les marqueurs [RENTABILITE], [STRUCTURE FINANCIERE], [CYCLE D'EXPLOITATION (BFR)], [TRAJECTOIRE & VALORISATION]."""
+    except Exception as e:
+        logging.exception(f"Claude step 2/4 (prompt build) failed: {type(e).__name__}: {e}")
+        raise
 
-    message = client.messages.create(
-        model="claude-sonnet-4-5",
-        max_tokens=2000,
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-    response_text = message.content[0].text.strip()
+    try:
+        message = client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=2000,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        response_text = message.content[0].text.strip()
+    except Exception as e:
+        logging.exception(f"Claude step 3/4 (API call) failed: {type(e).__name__}: {e}")
+        raise
 
     # Parse structured blocs
-    blocs = _parse_diagnostic_blocs(response_text)
+    try:
+        blocs = _parse_diagnostic_blocs(response_text)
+    except Exception as e:
+        logging.exception(f"Claude step 4/4 (parse) failed: {type(e).__name__}: {e}")
+        raise
 
     # Build backward-compatible dict (for frontend)
     # Extract key lines for the old format
