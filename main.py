@@ -30,6 +30,15 @@ RESEND_API_KEY = os.environ["RESEND_API_KEY"].strip()
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"].strip()
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://bwixapp.vercel.app").strip()
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "").strip()
+# Migration bilan.bwix.app : tout est configurable par env (défauts = comportement actuel).
+#   FRONTEND_URL  → retour Stripe (success/cancel) + liens des e-mails
+#   CORS_ORIGINS  → origines autorisées, séparées par des virgules (s'ajoutent à FRONTEND_URL)
+#   EMAIL_FROM    → expéditeur Resend (le domaine doit être vérifié chez Resend)
+_DEFAULT_CORS = ("https://bwixapp.vercel.app,https://bwix.app,https://www.bwix.app,"
+                 "https://bilan.bwix.app,http://localhost:8080")
+CORS_ORIGINS = [FRONTEND_URL] + [o.strip().rstrip("/") for o in
+                                 os.environ.get("CORS_ORIGINS", _DEFAULT_CORS).split(",") if o.strip()]
+EMAIL_FROM = os.environ.get("EMAIL_FROM", "BWIX <analyses@bwix.app>").strip()
 
 # Stripe: test mode support
 STRIPE_TEST_MODE = os.environ.get("STRIPE_TEST_MODE", "false").strip().lower() == "true"
@@ -69,7 +78,7 @@ MAX_PAGES = 100                       # bloc dur (mention UX : ~80 pages)
 app = FastAPI(title="BWIX API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL, "https://bwixapp.vercel.app", "https://bwix.app", "https://www.bwix.app", "http://localhost:8080"],
+    allow_origins=list(dict.fromkeys(CORS_ORIGINS)),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -439,7 +448,7 @@ def _html_to_text(html: str) -> str:
 
 async def send_email(to: str, subject: str, html: str, attachments: list = None):
     payload = {
-        "from": "BWIX <analyses@bwix.app>",
+        "from": EMAIL_FROM,
         "to": [to],
         "subject": subject,
         "html": html,

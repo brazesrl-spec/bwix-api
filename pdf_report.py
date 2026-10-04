@@ -2,9 +2,13 @@
 
 import base64
 import io
+import os
 from datetime import datetime
 
 from ratios import compute_badges
+
+# Domaine affiché dans l'en-tête/pied du PDF (configurable : BRAND_DOMAIN)
+BRAND_DOMAIN = os.environ.get("BRAND_DOMAIN", "bwix.app").strip()
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -246,7 +250,7 @@ def _header_footer(c, doc):
     c.drawString(MARGIN, PAGE_H - 7.5 * mm, "BWIX.")
     c.setFont("Helvetica", 8)
     c.setFillColor(colors.HexColor("#b0f0dd"))
-    c.drawRightString(PAGE_W - MARGIN, PAGE_H - 7.5 * mm, "bwix.app")
+    c.drawRightString(PAGE_W - MARGIN, PAGE_H - 7.5 * mm, BRAND_DOMAIN)
     # Footer
     c.setStrokeColor(GRAY_LINE)
     c.setLineWidth(0.5)
@@ -255,7 +259,7 @@ def _header_footer(c, doc):
     c.setFillColor(GRAY)
     now_str = datetime.now().strftime("%d/%m/%Y")
     c.drawString(MARGIN, 10 * mm,
-                 f"\u00a9 BWIX.app \u2014 {now_str} \u2014 Analyse indicative, non contractuelle. "
+                 f"\u00a9 {BRAND_DOMAIN} \u2014 {now_str} \u2014 Analyse indicative, non contractuelle. "
                  "Consultez votre fiduciaire pour toute decision.")
     c.setFont("Helvetica", 6)
     c.drawRightString(PAGE_W - MARGIN, 10 * mm, f"Page {doc.page}")
