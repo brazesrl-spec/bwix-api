@@ -1326,7 +1326,7 @@ def _get_default_price() -> dict:
         "price_id": price["id"],
         "amount_cents": cents,
         "currency": price["currency"],
-        "label": f"{amount}\u00a0\u20ac hors TVA",
+        "label": f"{amount}\u00a0\u20ac HTVA",
         "amount_display": f"{amount}\u00a0\u20ac",
     }
     _PRICE_CACHE.update(at=now, data=data)
