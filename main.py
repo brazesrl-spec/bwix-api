@@ -35,14 +35,14 @@ ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "").strip()
 STRIPE_TEST_MODE = os.environ.get("STRIPE_TEST_MODE", "false").strip().lower() == "true"
 if STRIPE_TEST_MODE:
     STRIPE_SECRET = os.environ.get("STRIPE_SECRET_KEY_TEST", "").strip()
-    STRIPE_PRICE_ID = os.environ.get("STRIPE_PRICE_ID_TEST", "").strip()
+    STRIPE_PRODUCT_ID = os.environ.get("STRIPE_PRODUCT_ID_TEST", "").strip()
     STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET_TEST", "").strip()
     logging.warning("\u26a0\ufe0f STRIPE TEST MODE ACTIF")
 else:
     STRIPE_SECRET = os.environ["STRIPE_SECRET_KEY"].strip()
-    # Montant affiché sur la home = 39,99 € TTC (cf. const PRICE_EUR dans bwixapp/analyse.js).
-    # ⚠ Si STRIPE_PRICE_ID est défini en env (Render), il PRIME sur ce défaut → le mettre à jour là aussi.
-    STRIPE_PRICE_ID = os.environ.get("STRIPE_PRICE_ID", "price_1TdRv71XczkPkPz6JA16d7aX").strip()
+    # Source unique du prix : le prix PAR DÉFAUT du produit Stripe « solo_bwix_financial ».
+    # Plus de STRIPE_PRICE_ID : changer le prix = changer le default_price du produit dans Stripe.
+    STRIPE_PRODUCT_ID = os.environ.get("STRIPE_PRODUCT_ID", "prod_UHtrAPYQ57NN45").strip()
     STRIPE_WEBHOOK_SECRET = os.environ["STRIPE_WEBHOOK_SECRET"].strip()
 
 stripe.api_key = STRIPE_SECRET
@@ -1304,6 +1304,45 @@ async def add_exercice(
 
 # ── Stripe ──────────────────────────────────────────────────────────────────
 
+_PRICE_CACHE: dict = {"at": 0.0, "data": None}
+_PRICE_TTL = 300  # s
+
+
+def _get_default_price() -> dict:
+    """Prix par défaut du produit Stripe (hors TVA), mis en cache 5 min."""
+    import time
+    now = time.time()
+    if _PRICE_CACHE["data"] and now - _PRICE_CACHE["at"] < _PRICE_TTL:
+        return _PRICE_CACHE["data"]
+    if not STRIPE_PRODUCT_ID:
+        raise RuntimeError("STRIPE_PRODUCT_ID(_TEST) non configuré")
+    product = stripe.Product.retrieve(STRIPE_PRODUCT_ID, expand=["default_price"])
+    price = product.get("default_price")
+    if not price or isinstance(price, str) or price.get("unit_amount") is None:
+        raise RuntimeError(f"Produit {STRIPE_PRODUCT_ID} sans default_price exploitable")
+    cents = int(price["unit_amount"])
+    amount = f"{cents / 100:.2f}".replace(".", ",")
+    data = {
+        "price_id": price["id"],
+        "amount_cents": cents,
+        "currency": price["currency"],
+        "label": f"{amount}\u00a0\u20ac hors TVA",
+        "amount_display": f"{amount}\u00a0\u20ac",
+    }
+    _PRICE_CACHE.update(at=now, data=data)
+    return data
+
+
+@app.get("/api/price")
+async def get_price():
+    try:
+        p = _get_default_price()
+    except Exception as e:
+        logging.exception(f"Stripe price lookup failed: {type(e).__name__}: {e}")
+        raise HTTPException(503, "Prix indisponible.")
+    return {k: p[k] for k in ("amount_cents", "currency", "label", "amount_display")}
+
+
 @app.post("/api/stripe/checkout")
 async def create_checkout(request: Request):
     body = await request.json()
@@ -1317,13 +1356,28 @@ async def create_checkout(request: Request):
     if rows[0].get("unlocked"):
         raise HTTPException(400, "Analyse déjà débloquée.")
 
+    try:
+        price_id = _get_default_price()["price_id"]
+    except Exception as e:
+        logging.exception(f"Stripe price lookup failed: {type(e).__name__}: {e}")
+        raise HTTPException(503, "Prix indisponible.")
+
     session = stripe.checkout.Session.create(
         payment_method_types=["card"],
         line_items=[{
-            "price": STRIPE_PRICE_ID,
+            "price": price_id,
             "quantity": 1,
         }],
         mode="payment",
+        # TVA : calcul automatique (Stripe Tax) + autoliquidation si n° TVA UE valide
+        automatic_tax={"enabled": True},
+        billing_address_collection="required",
+        tax_id_collection={"enabled": True},
+        customer_creation="always",
+        # Facture Stripe automatique après paiement
+        invoice_creation={"enabled": True, "invoice_data": {
+            "description": "BWIX — Analyse financière complète",
+        }},
         success_url=f"{FRONTEND_URL}/resultats?token={token}",
         cancel_url=f"{FRONTEND_URL}/resultats?token={token}",
         customer_email=rows[0]["email"] if rows[0]["email"] != "analyse@bwix.app" else None,
